@@ -167,7 +167,6 @@ add_rule() {
   echo "Порты по умолчанию:"
   echo "${DEFAULT_PORTS[*]}"
   echo
-
   echo "Логика:"
   echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
   echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
@@ -177,14 +176,11 @@ add_rule() {
 
   local selected_ports=""
   if [[ -z "${ports_in// }" ]]; then
-    # Enter -> только дефолт
     selected_ports="${DEFAULT_PORTS[*]}"
   else
-    # Ввели свои -> только свои (без дефолта)
     selected_ports="$ports_in"
   fi
 
-  # очистка/валидация
   local cleaned=""
   for p in $selected_ports; do
     if valid_port "$p"; then
@@ -224,6 +220,26 @@ add_rule() {
   fi
 }
 
+# выбор фильтра удаления по протоколу
+choose_delete_filter() {
+  while true; do
+    echo
+    echo "Удаление:"
+    echo "1) Удалять только UDP"
+    echo "2) Удалять только TCP"
+    echo "3) Удалять UDP и TCP (все)"
+    echo "0) Назад"
+    read -r -p "Ваш выбор: " sel
+    case "$sel" in
+      1) echo "udp"; return 0 ;;
+      2) echo "tcp"; return 0 ;;
+      3) echo "all"; return 0 ;;
+      0) echo "back"; return 0 ;;
+      *) echo "Неверный выбор." ;;
+    esac
+  done
+}
+
 delete_rule() {
   local WAN_IF="$1"
 
@@ -232,35 +248,78 @@ delete_rule() {
     return 0
   fi
 
+  local filt
+  filt="$(choose_delete_filter)"
+  [[ "$filt" == "back" ]] && return 0
+
   echo
   print_rules
   echo
+  echo "Дополнительно:"
+  echo "A) Удалить ВСЕ правила (с учетом выбранного фильтра)"
   echo "0) Назад"
-  read -r -p "Введите номер правила для удаления (можно несколько через пробел): " nums
+  echo
+  read -r -p "Введите номер(а) для удаления (через пробел) или A: " nums
+
   [[ "$nums" == "0" ]] && return 0
+
+  # Удалить все (по фильтру)
+  if [[ "$nums" == "A" || "$nums" == "a" ]]; then
+    if [[ "$filt" == "all" ]]; then
+      : > "$STATE_FILE"
+      apply_rules "$WAN_IF"
+      echo "Удалены ВСЕ правила."
+      return 0
+    else
+      # удалить только udp или только tcp
+      local tmp
+      tmp="$(mktemp)"
+      awk -v f="$filt" '$1 != f {print $0}' "$STATE_FILE" > "$tmp"
+      cat "$tmp" > "$STATE_FILE"
+      rm -f "$tmp"
+      apply_rules "$WAN_IF"
+      echo "Удалены ВСЕ правила протокола: $filt"
+      return 0
+    fi
+  fi
+
   [[ -z "${nums// }" ]] && { echo "Номера не указаны."; return 0; }
 
-  local filtered=""
+  # подготовим список номеров
+  local filtered_nums=""
   for n in $nums; do
     if [[ "$n" =~ ^[0-9]+$ ]]; then
-      filtered="$filtered $n"
+      filtered_nums="$filtered_nums $n"
     else
       echo "Пропускаю некорректный номер: $n"
     fi
   done
-  filtered="${filtered# }"
-  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; return 0; }
+  filtered_nums="${filtered_nums# }"
+  [[ -z "${filtered_nums// }" ]] && { echo "Нет валидных номеров."; return 0; }
 
+  # применяем удаление по номерам + фильтру протокола
   local tmp
   tmp="$(mktemp)"
   cp "$STATE_FILE" "$tmp"
 
-  awk -v nums="$filtered" '
+  awk -v nums="$filtered_nums" -v filt="$filt" '
     BEGIN{
       split(nums,a," ");
       for(i in a) del[a[i]]=1
     }
-    { if(!del[NR]) print $0 }
+    {
+      if(del[NR]){
+        # строка выбрана на удаление
+        if(filt=="all"){ next }
+        # filt udp/tcp: удаляем только если протокол совпадает
+        if($1==filt){ next }
+        # иначе оставляем
+        print $0
+        next
+      }
+      # строка не выбрана
+      print $0
+    }
   ' "$tmp" > "$STATE_FILE"
 
   rm -f "$tmp"
