@@ -15,9 +15,12 @@ require_root() {
 }
 
 ensure_prereqs() {
-  for c in iptables ip sysctl awk nl grep mktemp; do
-    command -v "$c" >/dev/null 2>&1 || { echo "Не найден $c. Установите зависимости." >&2; exit 1; }
-  done
+  command -v iptables >/dev/null 2>&1 || { echo "Не найден iptables. Установите iptables." >&2; exit 1; }
+  command -v ip >/dev/null 2>&1 || { echo "Не найден ip (iproute2)." >&2; exit 1; }
+  command -v sysctl >/dev/null 2>&1 || { echo "Не найден sysctl." >&2; exit 1; }
+  command -v awk >/dev/null 2>&1 || { echo "Не найден awk." >&2; exit 1; }
+  command -v nl >/dev/null 2>&1 || { echo "Не найден nl (coreutils)." >&2; exit 1; }
+  command -v grep >/dev/null 2>&1 || { echo "Не найден grep." >&2; exit 1; }
 }
 
 init_state() {
@@ -96,17 +99,12 @@ apply_rules() {
   iptables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
 
-  # применяем правила из файла
   while read -r proto port tip; do
     [[ -z "${proto:-}" || "${proto:0:1}" == "#" ]] && continue
     [[ -z "${port:-}" || -z "${tip:-}" ]] && continue
 
-    # на всякий — убираем \r
-    proto="${proto//$'\r'/}"
-    port="${port//$'\r'/}"
-    tip="${tip//$'\r'/}"
-
     iptables -t nat -A "$CHAIN_NAT" -p "$proto" --dport "$port" -j DNAT --to-destination "${tip}:${port}"
+
     iptables -A "$CHAIN_FWD" -p "$proto" -d "$tip" --dport "$port" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
     iptables -A "$CHAIN_FWD" -p "$proto" -s "$tip" --sport "$port" -m state --state ESTABLISHED,RELATED -j ACCEPT
   done < "$STATE_FILE"
@@ -169,20 +167,24 @@ add_rule() {
   echo "Порты по умолчанию:"
   echo "${DEFAULT_PORTS[*]}"
   echo
+
   echo "Логика:"
-  echo "- Enter: используются ТОЛЬКО порты по умолчанию"
-  echo "- Ввели свои: используются ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
+  echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
+  echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
   echo
   read -r -p "Порты (через пробел) или Enter (дефолт), 0 (назад): " ports_in
   [[ "$ports_in" == "0" ]] && return 0
 
   local selected_ports=""
   if [[ -z "${ports_in// }" ]]; then
+    # Enter -> только дефолт
     selected_ports="${DEFAULT_PORTS[*]}"
   else
+    # Ввели свои -> только свои (без дефолта)
     selected_ports="$ports_in"
   fi
 
+  # очистка/валидация
   local cleaned=""
   for p in $selected_ports; do
     if valid_port "$p"; then
@@ -222,25 +224,6 @@ add_rule() {
   fi
 }
 
-choose_delete_filter() {
-  while true; do
-    echo
-    echo "Удалять какие правила?"
-    echo "1) Только UDP"
-    echo "2) Только TCP"
-    echo "3) UDP и TCP (все)"
-    echo "0) Назад"
-    read -r -p "Ваш выбор: " sel
-    case "$sel" in
-      1) echo "udp"; return 0 ;;
-      2) echo "tcp"; return 0 ;;
-      3) echo "all"; return 0 ;;
-      0) echo "back"; return 0 ;;
-      *) echo "Неверный выбор." ;;
-    esac
-  done
-}
-
 delete_rule() {
   local WAN_IF="$1"
 
@@ -249,96 +232,37 @@ delete_rule() {
     return 0
   fi
 
-  local filt
-  filt="$(choose_delete_filter)"
-  [[ "$filt" == "back" ]] && return 0
-
-  # строим список для удаления: показываем ТОЛЬКО выбранный фильтр и перенумеровываем
-  local tmp_list
-  tmp_list="$(mktemp)"
-
-  if [[ "$filt" == "all" ]]; then
-    # формат: idx orig_line proto port ip
-    awk 'BEGIN{idx=0} {idx++; print idx, NR, $0}' "$STATE_FILE" > "$tmp_list"
-  else
-    awk -v f="$filt" '
-      BEGIN{idx=0}
-      {
-        p=$1; gsub(/\r/,"",p);
-        if(p==f){ idx++; print idx, NR, $0 }
-      }
-    ' "$STATE_FILE" > "$tmp_list"
-  fi
-
-  if [[ ! -s "$tmp_list" ]]; then
-    echo "По выбранному фильтру ($filt) правил нет."
-    rm -f "$tmp_list"
-    return 0
-  fi
-
   echo
-  echo "Правила для удаления (фильтр: $filt):"
-  awk '{printf "%2s) %s %s %s\n", $1, $3, $4, $5}' "$tmp_list"
+  print_rules
   echo
   echo "0) Назад"
-  echo "00) Удалить ВСЕ из этого списка (фильтр: $filt)"
-  echo
-  read -r -p "Введите номер(а) (через пробел) или 00: " nums
+  read -r -p "Введите номер правила для удаления (можно несколько через пробел): " nums
+  [[ "$nums" == "0" ]] && return 0
+  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; return 0; }
 
-  [[ "$nums" == "0" ]] && { rm -f "$tmp_list"; return 0; }
-
-  # удалить все по фильтру
-  if [[ "$nums" == "00" ]]; then
-    if [[ "$filt" == "all" ]]; then
-      : > "$STATE_FILE"
-    else
-      # удаляем все строки протокола filt
-      awk -v f="$filt" '
-        { p=$1; gsub(/\r/,"",p); if(p!=f) print $0 }
-      ' "$STATE_FILE" > "${STATE_FILE}.tmp"
-      mv "${STATE_FILE}.tmp" "$STATE_FILE"
-    fi
-    rm -f "$tmp_list"
-    apply_rules "$WAN_IF"
-    echo "Удалено: ВСЕ ($filt)."
-    return 0
-  fi
-
-  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; rm -f "$tmp_list"; return 0; }
-
-  # маппинг: пользовательские номера -> оригинальные номера строк файла
-  local orig_nums=""
+  local filtered=""
   for n in $nums; do
     if [[ "$n" =~ ^[0-9]+$ ]]; then
-      # ищем строку с этим idx и берём orig_line (2-й столбец)
-      local orig
-      orig="$(awk -v x="$n" '$1==x{print $2}' "$tmp_list" | head -n1 || true)"
-      if [[ -n "${orig:-}" ]]; then
-        orig_nums="$orig_nums $orig"
-      else
-        echo "Нет такого номера в списке: $n"
-      fi
+      filtered="$filtered $n"
     else
       echo "Пропускаю некорректный номер: $n"
     fi
   done
-  orig_nums="${orig_nums# }"
-  rm -f "$tmp_list"
+  filtered="${filtered# }"
+  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; return 0; }
 
-  [[ -z "${orig_nums// }" ]] && { echo "Нет валидных номеров для удаления."; return 0; }
-
-  # удаляем по оригинальным номерам строк (точно, без фильтров уже)
   local tmp
   tmp="$(mktemp)"
   cp "$STATE_FILE" "$tmp"
 
-  awk -v nums="$orig_nums" '
+  awk -v nums="$filtered" '
     BEGIN{
       split(nums,a," ");
       for(i in a) del[a[i]]=1
     }
     { if(!del[NR]) print $0 }
   ' "$tmp" > "$STATE_FILE"
+
   rm -f "$tmp"
 
   apply_rules "$WAN_IF"
