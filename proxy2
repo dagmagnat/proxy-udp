@@ -77,11 +77,12 @@ show_instructions() {
     echo ""
     echo -e "${CYAN}Обычный режим:${NC}"
     echo -e "1) Выберите пункт (UDP или TCP)."
-    echo -e "2) Введите IP назначения."
-    echo -e "3) Введите один или несколько портов через пробел (пример): ${YELLOW}51820 443${NC}"
+    echo -e "2) Введите IP назначения (или 0 назад)."
+    echo -e "3) Введите один или несколько портов через пробел (или 0 назад)."
+    echo -e "   Пример: ${YELLOW}51820 443${NC}"
     echo ""
     echo -e "${CYAN}AntiZapret:${NC}"
-    echo -e "Вы вводите только IP назначения и выбираете UDP/TCP — нужные порты добавятся автоматически."
+    echo -e "Вводите IP назначения (или 0 назад), выбираете UDP/TCP — порты добавятся автоматически."
     echo ""
     read -p "Нажмите Enter, чтобы вернуться в меню..."
 }
@@ -126,23 +127,38 @@ apply_forward_ports() {
     netfilter-persistent save > /dev/null
 }
 
-# --- Обычная настройка с вводом портов через пробел ---
+# --- Обычная настройка с вводом портов через пробел + 0 назад ---
 configure_rule_multiports() {
     local PROTO="$1"
     local NAME="$2"
 
     echo -e "\n${CYAN}--- Настройка: $NAME ($PROTO) ---${NC}"
+    echo -e "${YELLOW}Подсказка:${NC} введите ${WHITE}0${NC} чтобы вернуться назад."
 
+    # IP назначения
     while true; do
-        echo -e "Введите IP адрес назначения (куда пересылать):"
+        echo -e "Введите IP адрес назначения (куда пересылать) или 0 назад:"
         read -p "> " TARGET_IP
-        if [[ -n "$TARGET_IP" ]] && validate_ip "$TARGET_IP"; then break; fi
+
+        if [[ "$TARGET_IP" == "0" ]]; then
+            return
+        fi
+
+        if [[ -n "$TARGET_IP" ]] && validate_ip "$TARGET_IP"; then
+            break
+        fi
         echo -e "${RED}Ошибка: введите корректный IPv4 адрес.${NC}"
     done
 
+    # Порты
     while true; do
-        echo -e "Введите Порт(ы) (входной=выходной), можно несколько через пробел:"
+        echo -e "Введите Порт(ы) через пробел (пример: 51820 443) или 0 назад:"
         read -p "> " PORTS_RAW
+
+        if [[ "$PORTS_RAW" == "0" ]]; then
+            return
+        fi
+
         PORTS_RAW=$(echo "$PORTS_RAW" | xargs)
         if [[ -z "$PORTS_RAW" ]]; then
             echo -e "${RED}Ошибка: порты не указаны.${NC}"
@@ -160,7 +176,7 @@ configure_rule_multiports() {
         if (( valid == 1 )); then
             break
         else
-            echo -e "${RED}Ошибка: порты должны быть числами 1..65535. Пример: 51820 51821 443${NC}"
+            echo -e "${RED}Ошибка: порты должны быть числами 1..65535.${NC}"
         fi
     done
 
@@ -171,28 +187,38 @@ configure_rule_multiports() {
     read -p "Нажмите Enter для возврата в меню..."
 }
 
-# --- AntiZapret: IP вводим, порты фиксированные, выбираем UDP/TCP ---
+# --- AntiZapret: IP + выбор UDP/TCP + 0 назад, порты авто ---
 configure_antizapret() {
     local NAME="AmneziaWG/WireGuard AntiZapret"
     local PORTS_PRESET="50080 50443 51080 51443 52080 52443 1234 5959 35756 35757 56123 56124 5050"
 
     echo -e "\n${CYAN}--- Настройка: $NAME ---${NC}"
+    echo -e "${YELLOW}Подсказка:${NC} введите ${WHITE}0${NC} чтобы вернуться назад."
 
     while true; do
-        echo -e "Введите IP адрес назначения (сервер):"
+        echo -e "Введите IP адрес назначения (сервер) или 0 назад:"
         read -p "> " TARGET_IP
-        if [[ -n "$TARGET_IP" ]] && validate_ip "$TARGET_IP"; then break; fi
+
+        if [[ "$TARGET_IP" == "0" ]]; then
+            return
+        fi
+
+        if [[ -n "$TARGET_IP" ]] && validate_ip "$TARGET_IP"; then
+            break
+        fi
         echo -e "${RED}Ошибка: введите корректный IPv4 адрес.${NC}"
     done
 
     local PROTO=""
     while true; do
-        echo -e "Выберите протокол для форвардинга: ${YELLOW}1) UDP  2) TCP${NC}"
+        echo -e "Выберите протокол: 1) UDP  2) TCP  (0 назад)"
         read -p "> " pch
+
         case "$pch" in
+            0) return ;;
             1) PROTO="udp"; break ;;
             2) PROTO="tcp"; break ;;
-            *) echo -e "${RED}Введите 1 или 2.${NC}" ;;
+            *) echo -e "${RED}Введите 1, 2 или 0.${NC}" ;;
         esac
     done
 
@@ -293,7 +319,7 @@ show_menu() {
     while true; do
         clear
         echo -e "${MAGENTA}==============================================${NC}"
-        echo -e "${MAGENTA}                 КАСКАД / DNAT                ${NC}"
+        echo -e "${MAGENTA}                 PROXY / DNAT                 ${NC}"
         echo -e "${MAGENTA}==============================================${NC}"
         echo ""
         echo -e "1) Настроить ${CYAN}AmneziaWG / WireGuard${NC} (UDP)"
