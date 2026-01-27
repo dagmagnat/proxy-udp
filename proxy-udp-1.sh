@@ -19,6 +19,8 @@ ensure_prereqs() {
   command -v ip >/dev/null 2>&1 || { echo "Не найден ip (iproute2)." >&2; exit 1; }
   command -v sysctl >/dev/null 2>&1 || { echo "Не найден sysctl." >&2; exit 1; }
   command -v awk >/dev/null 2>&1 || { echo "Не найден awk." >&2; exit 1; }
+  command -v nl >/dev/null 2>&1 || { echo "Не найден nl (coreutils)." >&2; exit 1; }
+  command -v grep >/dev/null 2>&1 || { echo "Не найден grep." >&2; exit 1; }
 }
 
 init_state() {
@@ -117,7 +119,7 @@ print_rules() {
   nl -w2 -s') ' "$STATE_FILE"
 }
 
-# ВАЖНО: меню печатаем в stderr, а результат — в stdout
+# меню в stderr, результат в stdout
 choose_protocol_menu() {
   while true; do
     echo "" >&2
@@ -166,18 +168,25 @@ add_rule() {
   echo "${DEFAULT_PORTS[*]}"
   echo
 
-  read -r -p "Дополнительные порты (через пробел) или Enter чтобы пропустить, 0 (назад): " extra_ports
-  [[ "$extra_ports" == "0" ]] && return 0
+  echo "Логика:"
+  echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
+  echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
+  echo
+  read -r -p "Порты (через пробел) или Enter (дефолт), 0 (назад): " ports_in
+  [[ "$ports_in" == "0" ]] && return 0
 
-  local combined
-  if [[ -z "${extra_ports// }" ]]; then
-    combined="${DEFAULT_PORTS[*]}"
+  local selected_ports=""
+  if [[ -z "${ports_in// }" ]]; then
+    # Enter -> только дефолт
+    selected_ports="${DEFAULT_PORTS[*]}"
   else
-    combined="${DEFAULT_PORTS[*]} $extra_ports"
+    # Ввели свои -> только свои (без дефолта)
+    selected_ports="$ports_in"
   fi
 
+  # очистка/валидация
   local cleaned=""
-  for p in $combined; do
+  for p in $selected_ports; do
     if valid_port "$p"; then
       cleaned="$cleaned $p"
     else
@@ -294,4 +303,3 @@ main_menu() {
 }
 
 main_menu
-
