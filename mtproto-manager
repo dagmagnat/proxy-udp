@@ -34,7 +34,7 @@ trim() {
   printf "%s" "$s"
 }
 
-# теперь можно ЛЮБОЙ порт 1-65535 (включая 80 и 443)
+# любой порт 1-65535
 valid_port() {
   local p
   p="$(trim "${1:-}")"
@@ -158,6 +158,41 @@ get_public_ip() {
   echo "$ip"
 }
 
+ask_port_if_busy_default_443() {
+  local port="443"
+  if port_free "$port"; then
+    echo "$port"
+    return 0
+  fi
+
+  echo
+  echo "Порт 443 занят на сервере."
+  echo "Рекомендуется использовать 443, но можно выбрать любой свободный."
+  while true; do
+    read -r -p "Введите другой порт (или Enter для случайного свободного): " port
+    port="$(trim "${port:-}")"
+
+    if [[ -z "$port" ]]; then
+      port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 1; }
+      echo "$port"
+      return 0
+    fi
+
+    if ! valid_port "$port"; then
+      echo "Неверный порт: '$port'"
+      continue
+    fi
+
+    if ! port_free "$port"; then
+      echo "Порт $port занят. Выберите другой."
+      continue
+    fi
+
+    echo "$port"
+    return 0
+  done
+}
+
 показать_ссылку() {
   conf_load
   if [[ -z "$CONF_PORT" || -z "$CONF_KEY" ]]; then
@@ -193,10 +228,14 @@ get_public_ip() {
   local port="$CONF_PORT"
   local key="$CONF_KEY"
 
-  # если нет конфига — создаём автоматически: порт случайный, ключ случайный
-  if [[ -z "$port" || -z "$key" ]]; then
-    port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 1; }
+  # если нет ключа — создаём
+  if [[ -z "$key" ]]; then
     key="$(rand_hex_16bytes)"
+  fi
+
+  # если нет порта — по умолчанию пытаемся 443, если занят — спрашиваем/подбираем
+  if [[ -z "$port" ]]; then
+    port="$(ask_port_if_busy_default_443)" || return 1
     conf_save "$port" "$key"
   fi
 
@@ -310,7 +349,7 @@ get_public_ip() {
   while true; do
     echo
     echo "=========== MTProto Proxy (менеджер) ==========="
-    echo "1) Создать/Запустить MTProto Proxy (порт выбирается автоматически)"
+    echo "1) Создать/Запустить MTProto Proxy (по умолчанию порт 443)"
     echo "2) Остановить"
     echo "3) Перезапустить"
     echo "4) Статус"
