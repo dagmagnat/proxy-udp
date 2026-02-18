@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# MTProto Proxy Manager (RU)
-# =========================
-
 CONF="/etc/mtproto_manager.conf"
 CONTAINER_NAME="mtproto-proxy"
 IMAGE="telegrammessenger/proxy:latest"
@@ -27,26 +23,22 @@ valid_port() {
 
 port_allowed() {
   local p="$1"
-  # Запрещаем 80 и 443 (как вы попросили)
   [[ "$p" != "80" && "$p" != "443" ]] || return 1
   return 0
 }
 
 port_free() {
   local p="$1"
-  # Проверяем, что порт не занят (TCP LISTEN)
   if cmd_exists ss; then
-    ! ss -lnt "( sport = :$p )" 2>/dev/null | grep -q ":$p"
+    ! ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
   elif cmd_exists netstat; then
-    ! netstat -lnt 2>/dev/null | awk '{print $4}' | grep -q ":$p$"
+    ! netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
   else
-    # если нечем проверять — пропускаем (best effort)
     return 0
   fi
 }
 
 rand_hex_16bytes() {
-  # 16 bytes => 32 hex-символа
   if cmd_exists openssl; then
     openssl rand -hex 16
   else
@@ -68,14 +60,13 @@ choose_port() {
     1)
       local p tries=0
       while true; do
-        # диапазон 20000-65000, чтобы реже конфликтовать
         p=$((20000 + (RANDOM % 45000)))
         tries=$((tries + 1))
         if valid_port "$p" && port_allowed "$p" && port_free "$p"; then
           echo "$p"
           return 0
         fi
-        (( tries >= 200 )) && { echo "Не смог подобрать свободный порт." >&2; return 1; }
+        (( tries >= 300 )) && { echo "Не смог подобрать свободный порт." >&2; return 1; }
       done
       ;;
     2)
@@ -85,16 +76,9 @@ choose_port() {
       port_allowed "$p" || { echo "Порт 80/443 запрещён." >&2; return 1; }
       port_free "$p" || { echo "Порт занят." >&2; return 1; }
       echo "$p"
-      return 0
       ;;
-    0)
-      echo "back"
-      return 0
-      ;;
-    *)
-      echo "Неверный выбор." >&2
-      return 1
-      ;;
+    0) echo "back" ;;
+    *) echo "Неверный выбор." >&2; return 1 ;;
   esac
 }
 
@@ -108,45 +92,76 @@ ensure_docker() {
   if cmd_exists docker; then
     return 0
   fi
-
   echo "Docker не найден. Пытаюсь установить..."
-
   if cmd_exists apt-get; then
     install_docker_apt
   else
     echo "Автоустановка поддерживается только для Debian/Ubuntu (apt). Установите Docker вручную." >&2
     exit 1
   fi
-
   cmd_exists docker || { echo "Docker не установился." >&2; exit 1; }
 }
 
-save_conf() {
+# --- безопасное чтение конфига (без source) ---
+CONF_PORT=""
+CONF_SECRET=""
+CONF_TAG=""
+
+conf_reset() {
+  CONF_PORT=""
+  CONF_SECRET=""
+  CONF_TAG=""
+}
+
+conf_load() {
+  conf_reset
+  [[ -f "$CONF" ]] || return 0
+
+  # Читаем только строки вида KEY=VALUE (без исполнения)
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # убрать CRLF
+    line="${line%$'\r'}"
+    # пропуск пустых и комментариев
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    # только KEY=VALUE
+    [[ "$line" == *=* ]] || continue
+
+    local key="${line%%=*}"
+    local val="${line#*=}"
+
+    # уберём пробелы вокруг key
+    key="${key//[[:space:]]/}"
+
+    case "$key" in
+      PORT)   CONF_PORT="$val" ;;
+      SECRET) CONF_SECRET="$val" ;;
+      TAG)    CONF_TAG="$val" ;;
+    esac
+  done < "$CONF"
+
+  # лёгкая валидация: если порт/секрет кривые — сбросим
+  if [[ -n "$CONF_PORT" ]]; then
+    valid_port "$CONF_PORT" || CONF_PORT=""
+    port_allowed "$CONF_PORT" || CONF_PORT=""
+  fi
+  if [[ -n "$CONF_SECRET" ]]; then
+    [[ "$CONF_SECRET" =~ ^[0-9a-fA-F]{32}$ ]] || CONF_SECRET=""
+  fi
+}
+
+conf_save() {
   local port="$1" secret="$2" tag="$3"
   cat > "$CONF" <<EOF
+# MTProto Proxy Manager config
 PORT=$port
 SECRET=$secret
 TAG=$tag
-CONTAINER=$CONTAINER_NAME
-IMAGE=$IMAGE
 EOF
   chmod 600 "$CONF"
 }
 
-load_conf() {
-  if [[ -f "$CONF" ]]; then
-    # shellcheck disable=SC1090
-    source "$CONF"
-  else
-    PORT=""
-    SECRET=""
-    TAG=""
-  fi
-}
-
 open_firewall_iptables() {
   local port="$1"
-  # Открываем TCP порт в iptables (best effort)
   if cmd_exists iptables; then
     iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
       iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
@@ -156,19 +171,19 @@ open_firewall_iptables() {
 get_public_ip() {
   local ip=""
   if cmd_exists curl; then
-    ip="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+    ip="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 4 https://ifconfig.me 2>/dev/null || true)"
   elif cmd_exists wget; then
-    ip="$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(wget -qO- --timeout=3 https://ifconfig.me 2>/dev/null || true)"
+    ip="$(wget -qO- --timeout=4 https://api.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(wget -qO- --timeout=4 https://ifconfig.me 2>/dev/null || true)"
   fi
   echo "$ip"
 }
 
 показать_ссылку() {
-  load_conf
-  if [[ -z "${PORT:-}" || -z "${SECRET:-}" ]]; then
-    echo "Прокси не настроен (нет конфигурации)." >&2
+  conf_load
+  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then
+    echo "Прокси не настроен (нет конфигурации). Сначала пункт 1." >&2
     return 1
   fi
 
@@ -177,39 +192,37 @@ get_public_ip() {
 
   echo
   echo "Данные MTProto Proxy:"
-  echo "Порт  : $PORT"
-  echo "Секрет: dd$SECRET"
-  [[ -n "${TAG:-}" ]] && echo "TAG   : $TAG"
+  echo "Порт  : $CONF_PORT"
+  echo "Секрет: dd$CONF_SECRET"
+  [[ -n "$CONF_TAG" ]] && echo "TAG   : $CONF_TAG"
   echo
 
   if [[ -n "$ip" ]]; then
     echo "IP сервера: $ip"
-    echo
     echo "Ссылка для Telegram:"
-    echo "tg://proxy?server=${ip}&port=${PORT}&secret=dd${SECRET}"
+    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=dd${CONF_SECRET}"
   else
     echo "Не удалось определить публичный IP автоматически."
     echo "Вставьте свой IP вручную:"
-    echo "tg://proxy?server=ВАШ_IP&port=${PORT}&secret=dd${SECRET}"
+    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=dd${CONF_SECRET}"
   fi
-
   echo
 }
 
 запустить_прокси() {
   ensure_docker
-  load_conf
+  conf_load
 
-  local port secret tag
+  local port="$CONF_PORT"
+  local secret="$CONF_SECRET"
+  local tag="$CONF_TAG"
 
-  if [[ -z "${PORT:-}" || -z "${SECRET:-}" ]]; then
+  if [[ -z "$port" || -z "$secret" ]]; then
     port="$(choose_port)" || return 1
     [[ "$port" == "back" ]] && return 0
-
     secret="$(rand_hex_16bytes)"
-    tag=""
-    save_conf "$port" "$secret" "$tag"
-    load_conf
+    tag="$tag"   # оставить как есть (обычно пусто)
+    conf_save "$port" "$secret" "$tag"
   fi
 
   # если контейнер уже есть — удалим, чтобы пересоздать корректно
@@ -220,25 +233,24 @@ get_public_ip() {
   echo "Запускаю MTProto Proxy в Docker..."
   docker pull "$IMAGE" >/dev/null
 
-  # контейнер слушает 443 внутри, наружу мапим выбранный порт PORT
-  if [[ -n "${TAG:-}" ]]; then
+  if [[ -n "$tag" ]]; then
     docker run -d \
       --name "$CONTAINER_NAME" \
       --restart unless-stopped \
-      -p "${PORT}:443" \
-      -e "SECRET=${SECRET}" \
-      -e "TAG=${TAG}" \
+      -p "${port}:443" \
+      -e "SECRET=${secret}" \
+      -e "TAG=${tag}" \
       "$IMAGE" >/dev/null
   else
     docker run -d \
       --name "$CONTAINER_NAME" \
       --restart unless-stopped \
-      -p "${PORT}:443" \
-      -e "SECRET=${SECRET}" \
+      -p "${port}:443" \
+      -e "SECRET=${secret}" \
       "$IMAGE" >/dev/null
   fi
 
-  open_firewall_iptables "$PORT"
+  open_firewall_iptables "$port"
 
   echo "MTProto Proxy запущен."
   показать_ссылку
@@ -256,16 +268,16 @@ get_public_ip() {
 
 статус() {
   ensure_docker
-  load_conf
+  conf_load
   echo
   echo "Статус контейнера:"
   docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
   echo
   if [[ -f "$CONF" ]]; then
     echo "Конфиг: $CONF"
-    echo "PORT=${PORT:-}"
-    echo "SECRET=dd${SECRET:-}"
-    [[ -n "${TAG:-}" ]] && echo "TAG=${TAG}"
+    echo "PORT=${CONF_PORT:-}"
+    echo "SECRET=dd${CONF_SECRET:-}"
+    [[ -n "$CONF_TAG" ]] && echo "TAG=${CONF_TAG}"
   else
     echo "Конфиг не найден: $CONF"
   fi
@@ -273,29 +285,29 @@ get_public_ip() {
 }
 
 изменить_tag() {
-  load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  conf_load
+  [[ -f "$CONF" && -n "$CONF_PORT" && -n "$CONF_SECRET" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
   read -r -p "Введите TAG (пусто чтобы очистить): " newtag
-  save_conf "${PORT}" "${SECRET}" "$newtag"
+  conf_save "$CONF_PORT" "$CONF_SECRET" "$newtag"
   echo "TAG обновлён. Чтобы применить — перезапустите (пункт 3)."
 }
 
 пересоздать_секрет() {
-  load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  conf_load
+  [[ -f "$CONF" && -n "$CONF_PORT" && -n "$CONF_SECRET" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
   local newsecret; newsecret="$(rand_hex_16bytes)"
-  save_conf "${PORT}" "$newsecret" "${TAG:-}"
+  conf_save "$CONF_PORT" "$newsecret" "$CONF_TAG"
   echo "Секрет обновлён. Чтобы применить — перезапустите (пункт 3)."
   показать_ссылку
 }
 
 изменить_порт() {
-  load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  conf_load
+  [[ -f "$CONF" && -n "$CONF_PORT" && -n "$CONF_SECRET" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
   local newport
   newport="$(choose_port)" || return 1
   [[ "$newport" == "back" ]] && return 0
-  save_conf "$newport" "${SECRET}" "${TAG:-}"
+  conf_save "$newport" "$CONF_SECRET" "$CONF_TAG"
   echo "Порт обновлён. Чтобы применить — перезапустите (пункт 3)."
 }
 
