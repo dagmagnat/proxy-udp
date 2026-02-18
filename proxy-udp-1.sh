@@ -1,49 +1,312 @@
-# ====== Pretty UI helpers ======
-# (терминал может быть без цветов — тогда будет просто текст)
+#!/usr/bin/env bash
+set -euo pipefail
 
-supports_color() {
-  [[ -t 1 ]] || return 1
-  command -v tput >/dev/null 2>&1 || return 1
-  [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]
-}
+STATE_FILE="/etc/redirect_manager.rules"
+CHAIN_NAT="REDIR_MGR"
+CHAIN_FWD="REDIR_MGR_FWD"
 
-init_colors() {
-  if supports_color; then
-    BOLD="$(tput bold)"
-    DIM="$(tput dim)"
-    RESET="$(tput sgr0)"
-    RED="$(tput setaf 1)"
-    GREEN="$(tput setaf 2)"
-    YELLOW="$(tput setaf 3)"
-    BLUE="$(tput setaf 4)"
-    MAGENTA="$(tput setaf 5)"
-    CYAN="$(tput setaf 6)"
-    GRAY="$(tput setaf 7)"
-  else
-    BOLD=""; DIM=""; RESET=""
-    RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; GRAY=""
+DEFAULT_PORTS=(1234 5959 35756 35757 56123 56124 50080 50443 51080 51443 52080 52443)
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "Запустите скрипт от root: sudo $0" >&2
+    exit 1
   fi
 }
 
-term_width() {
-  local w
-  w="$(tput cols 2>/dev/null || echo 80)"
-  (( w < 60 )) && w=60
-  echo "$w"
+ensure_prereqs() {
+  command -v iptables >/dev/null 2>&1 || { echo "Не найден iptables. Установите iptables." >&2; exit 1; }
+  command -v ip >/dev/null 2>&1 || { echo "Не найден ip (iproute2)." >&2; exit 1; }
+  command -v sysctl >/dev/null 2>&1 || { echo "Не найден sysctl." >&2; exit 1; }
+  command -v awk >/dev/null 2>&1 || { echo "Не найден awk." >&2; exit 1; }
+  command -v nl >/dev/null 2>&1 || { echo "Не найден nl (coreutils)." >&2; exit 1; }
+  command -v grep >/dev/null 2>&1 || { echo "Не найден grep." >&2; exit 1; }
 }
 
-hr() {
-  local w ch
-  w="$(term_width)"
-  ch="${1:-─}"
-  printf "%*s\n" "$w" "" | tr " " "$ch"
+init_state() {
+  if [[ ! -f "$STATE_FILE" ]]; then
+    touch "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+  fi
 }
 
-center() {
-  local w text
-  w="$(term_width)"
-  text="$1"
-  # центрируем по ширине, без учета цвета (окей для простых заголовков)
+detect_wan_if() {
+  local ifn
+  ifn="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)"
+  if [[ -n "${ifn:-}" ]]; then
+    echo "$ifn"
+  else
+    ip -br link | awk '$1 !~ /lo/ {print $1; exit}'
+  fi
+}
+
+enable_ip_forward() {
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  if ! grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null; then
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  fi
+}
+
+valid_ip() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local o1 o2 o3 o4
+  IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    ((o >= 0 && o <= 255)) || return 1
+  done
+  return 0
+}
+
+valid_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  ((p >= 1 && p <= 65535)) || return 1
+  return 0
+}
+
+uniq_ports() {
+  local in="$1"
+  awk '
+    {
+      for(i=1;i<=NF;i++){
+        if(!seen[$i]++){
+          out = out (out?OFS:"") $i
+        }
+      }
+    }
+    END{ print out }
+  ' <<< "$in"
+}
+
+apply_rules() {
+  local WAN_IF="$1"
+
+  enable_ip_forward
+
+  iptables -t nat -N "$CHAIN_NAT" 2>/dev/null || true
+  iptables -t nat -F "$CHAIN_NAT"
+
+  iptables -N "$CHAIN_FWD" 2>/dev/null || true
+  iptables -F "$CHAIN_FWD"
+
+  iptables -t nat -D PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT" 2>/dev/null || true
+  iptables -t nat -A PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT"
+
+  iptables -D FORWARD -j "$CHAIN_FWD" 2>/dev/null || true
+  iptables -A FORWARD -j "$CHAIN_FWD"
+
+  iptables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || \
+  iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
+
+  while read -r proto port tip; do
+    [[ -z "${proto:-}" || "${proto:0:1}" == "#" ]] && continue
+    [[ -z "${port:-}" || -z "${tip:-}" ]] && continue
+
+    iptables -t nat -A "$CHAIN_NAT" -p "$proto" --dport "$port" -j DNAT --to-destination "${tip}:${port}"
+
+    iptables -A "$CHAIN_FWD" -p "$proto" -d "$tip" --dport "$port" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+    iptables -A "$CHAIN_FWD" -p "$proto" -s "$tip" --sport "$port" -m state --state ESTABLISHED,RELATED -j ACCEPT
+  done < "$STATE_FILE"
+}
+
+print_rules() {
+  if [[ ! -s "$STATE_FILE" ]]; then
+    echo "Правил нет."
+    return
+  fi
+  echo "Текущие правила (proto port -> target):"
+  nl -w2 -s') ' "$STATE_FILE"
+}
+
+choose_protocol_menu() {
+  while true; do
+    echo "" >&2
+    echo "Выберите протокол:" >&2
+    echo "1) UDP" >&2
+    echo "2) TCP" >&2
+    echo "3) UDP и TCP" >&2
+    echo "0) Назад" >&2
+    echo "" >&2
+    read -r -p "Ваш выбор: " sel >&2
+
+    case "$sel" in
+      1) echo "udp";  return 0 ;;
+      2) echo "tcp";  return 0 ;;
+      3) echo "both"; return 0 ;;
+      0) echo "back"; return 0 ;;
+      *) echo "Неверный выбор, попробуйте снова." >&2 ;;
+    esac
+  done
+}
+
+add_rule() {
+  local WAN_IF="$1"
+
+  echo
+  read -r -p "IP сервера назначения (куда перенаправлять) или 0 (назад): " target_ip
+  [[ "$target_ip" == "0" ]] && return 0
+  if ! valid_ip "$target_ip"; then
+    echo "Неверный IP."
+    return 0
+  fi
+
+  local proto_choice
+  proto_choice="$(choose_protocol_menu)"
+  [[ "$proto_choice" == "back" ]] && return 0
+
+  local protos=()
+  case "$proto_choice" in
+    udp)  protos=("udp") ;;
+    tcp)  protos=("tcp") ;;
+    both) protos=("udp" "tcp") ;;
+  esac
+
+  echo
+  echo "Порты по умолчанию:"
+  echo "${DEFAULT_PORTS[*]}"
+  echo
+
+  echo "Логика:"
+  echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
+  echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
+  echo
+  read -r -p "Порты (через пробел) или Enter (дефолт), 0 (назад): " ports_in
+  [[ "$ports_in" == "0" ]] && return 0
+
+  local selected_ports=""
+  if [[ -z "${ports_in// }" ]]; then
+    selected_ports="${DEFAULT_PORTS[*]}"
+  else
+    selected_ports="$ports_in"
+  fi
+
+  local cleaned=""
+  for p in $selected_ports; do
+    if valid_port "$p"; then
+      cleaned="$cleaned $p"
+    else
+      echo "Пропускаю некорректный порт: $p"
+    fi
+  done
+  cleaned="${cleaned# }"
+
+  if [[ -z "${cleaned// }" ]]; then
+    echo "Не осталось валидных портов — отмена."
+    return 0
+  fi
+
+  local final_ports
+  final_ports="$(uniq_ports "$cleaned")"
+
+  local added_any=0
+  for p in $final_ports; do
+    for pr in "${protos[@]}"; do
+      if grep -qE "^${pr}[[:space:]]+${p}[[:space:]]+${target_ip}$" "$STATE_FILE"; then
+        echo "Уже есть: $pr $p -> $target_ip"
+      else
+        echo "${pr} ${p} ${target_ip}" >> "$STATE_FILE"
+        echo "Добавлено: $pr $p -> $target_ip"
+        added_any=1
+      fi
+    done
+  done
+
+  if [[ "$added_any" -eq 1 ]]; then
+    apply_rules "$WAN_IF"
+    echo "Готово."
+  else
+    echo "Ничего не добавлено (возможно, все правила уже существовали)."
+  fi
+}
+
+delete_rule() {
+  local WAN_IF="$1"
+
+  if [[ ! -s "$STATE_FILE" ]]; then
+    echo "Удалять нечего — правил нет."
+    return 0
+  fi
+
+  echo
+  print_rules
+  echo
+  echo "0) Назад"
+  read -r -p "Введите номер правила для удаления (можно несколько через пробел): " nums
+  [[ "$nums" == "0" ]] && return 0
+  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; return 0; }
+
+  local filtered=""
+  for n in $nums; do
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+      filtered="$filtered $n"
+    else
+      echo "Пропускаю некорректный номер: $n"
+    fi
+  done
+  filtered="${filtered# }"
+  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; return 0; }
+
+  local tmp
+  tmp="$(mktemp)"
+  cp "$STATE_FILE" "$tmp"
+
+  awk -v nums="$filtered" '
+    BEGIN{
+      split(nums,a," ");
+      for(i in a) del[a[i]]=1
+    }
+    { if(!del[NR]) print $0 }
+  ' "$tmp" > "$STATE_FILE"
+
+  rm -f "$tmp"
+
+  apply_rules "$WAN_IF"
+  echo "Удаление выполнено."
+}
+
+# =========================
+# Pretty UI (colors + boxes)
+# =========================
+
+C_RESET=$'\033[0m'
+C_BOLD=$'\033[1m'
+C_DIM=$'\033[2m'
+
+C_RED=$'\033[31m'
+C_GREEN=$'\033[32m'
+C_YELLOW=$'\033[33m'
+C_BLUE=$'\033[34m'
+C_MAG=$'\033[35m'
+C_CYAN=$'\033[36m'
+C_GRAY=$'\033[90m'
+
+if [[ ! -t 1 ]]; then
+  C_RESET=""; C_BOLD=""; C_DIM=""
+  C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_MAG=""; C_CYAN=""; C_GRAY=""
+fi
+
+term_cols() {
+  local c
+  c="$(tput cols 2>/dev/null || echo 80)"
+  (( c < 60 )) && c=60
+  echo "$c"
+}
+
+repeat_char() {
+  local ch="$1" n="$2"
+  printf "%*s" "$n" "" | tr " " "$ch"
+}
+
+line_hr() {
+  local ch="${1:-─}"
+  repeat_char "$ch" "$(term_cols)"
+  echo
+}
+
+center_text() {
+  local text="$1"
+  local w; w="$(term_cols)"
   local len=${#text}
   if (( len >= w )); then
     echo "$text"
@@ -53,129 +316,161 @@ center() {
   fi
 }
 
-clear_screen() {
+clear_ui() {
   command -v clear >/dev/null 2>&1 && clear || printf "\n\n"
 }
 
-pause() {
+ok()    { echo "${C_GREEN}${C_BOLD}✔${C_RESET} $*"; }
+warn()  { echo "${C_YELLOW}${C_BOLD}⚠${C_RESET} $*"; }
+err()   { echo "${C_RED}${C_BOLD}✖${C_RESET} $*" >&2; }
+info()  { echo "${C_CYAN}${C_BOLD}ℹ${C_RESET} $*"; }
+
+pause_ui() {
   echo
-  read -r -p "Нажмите Enter чтобы продолжить... " _ 2>/dev/null || true
+  read -r -p "${C_DIM}Нажмите Enter чтобы продолжить...${C_RESET} " _ || true
 }
 
-safe_read() {
-  # safe_read "prompt" varname
-  local prompt="$1"
-  local __var="$2"
-  local ans=""
-  read -r -p "$prompt" ans 2>/dev/null || ans=""
-  printf -v "$__var" "%s" "$ans"
+safe_read_ui() {
+  local prompt="$1" var="$2" ans=""
+  read -r -p "$prompt" ans || ans=""
+  printf -v "$var" "%s" "$ans"
 }
 
-status_block() {
-  local WAN_IF="$1"
-  local rules_count="0"
-  if [[ -f "$STATE_FILE" ]]; then
-    # считаем только "валидные" строки (не пустые и не комментарии)
-    rules_count="$(awk 'NF && $1 !~ /^#/' "$STATE_FILE" 2>/dev/null | wc -l | tr -d ' ')"
-  fi
-
-  echo "${DIM}Интерфейс WAN:${RESET} ${BOLD}${CYAN}${WAN_IF}${RESET}"
-  echo "${DIM}Файл правил:${RESET} ${BOLD}${STATE_FILE}${RESET}"
-  echo "${DIM}Цепочки:${RESET} nat/${BOLD}${CHAIN_NAT}${RESET}, filter/${BOLD}${CHAIN_FWD}${RESET}"
-  echo "${DIM}Правил в состоянии:${RESET} ${BOLD}${GREEN}${rules_count}${RESET}"
+count_rules() {
+  [[ -f "$STATE_FILE" ]] || { echo 0; return; }
+  awk 'NF && $1 !~ /^#/' "$STATE_FILE" 2>/dev/null | wc -l | tr -d ' '
 }
 
-header() {
+ui_header() {
   local title="$1"
-  clear_screen
-  hr "═"
-  center "${BOLD}${MAGENTA}${title}${RESET}"
-  hr "═"
+  clear_ui
+  line_hr "═"
+  center_text "${C_BOLD}${C_MAG}${title}${C_RESET}"
+  line_hr "═"
 }
 
-menu_box() {
-  # просто красивое меню
-  echo
-  echo "${BOLD}Выберите действие:${RESET}"
-  echo "  ${BOLD}${CYAN}1${RESET}) ➕ Добавить правило"
-  echo "  ${BOLD}${CYAN}2${RESET}) 🗑  Удалить правило"
-  echo "  ${BOLD}${CYAN}3${RESET}) 📋 Показать правила"
-  echo "  ${BOLD}${CYAN}4${RESET}) 🔄 Применить правила заново"
-  echo "  ${BOLD}${CYAN}0${RESET}) 🚪 Выход"
-  echo
+ui_box() {
+  local title="$1"; shift
+  local w; w="$(term_cols)"
+  local inner=$(( w - 4 ))
+  (( inner < 20 )) && inner=20
+
+  echo "${C_GRAY}┌$(repeat_char "─" $((w-2)))┐${C_RESET}"
+  printf "${C_GRAY}│${C_RESET} ${C_BOLD}${C_CYAN}%-*s${C_RESET} ${C_GRAY}│${C_RESET}\n" "$inner" "$title"
+  echo "${C_GRAY}├$(repeat_char "─" $((w-2)))┤${C_RESET}"
+
+  while IFS= read -r line; do
+    printf "${C_GRAY}│${C_RESET} %-*s ${C_GRAY}│${C_RESET}\n" "$inner" "$line"
+  done < <(printf "%s\n" "$*")
+
+  echo "${C_GRAY}└$(repeat_char "─" $((w-2)))┘${C_RESET}"
 }
 
-error_msg() { echo "${RED}Ошибка:${RESET} $*" >&2; }
-ok_msg()    { echo "${GREEN}OK:${RESET} $*"; }
-info_msg()  { echo "${CYAN}ℹ${RESET} $*"; }
+ui_status() {
+  local wan="$1"
+  local rules; rules="$(count_rules)"
+  local now; now="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
 
-# ====== Replace main_menu with this ======
+  local s1="WAN: ${C_BOLD}${C_CYAN}${wan}${C_RESET}   Rules: ${C_BOLD}${C_GREEN}${rules}${C_RESET}"
+  local s2="State: ${STATE_FILE}"
+  local s3="Chains: nat/${CHAIN_NAT}  filter/${CHAIN_FWD}"
+  local s4="Time: ${C_DIM}${now}${C_RESET}"
+
+  ui_box "STATUS" "$s1" "$s2" "$s3" "$s4"
+}
+
+ui_menu() {
+  ui_box "MENU" \
+"  ${C_BOLD}${C_CYAN}1${C_RESET}) ➕ Add rule" \
+"  ${C_BOLD}${C_CYAN}2${C_RESET}) 🗑  Delete rule" \
+"  ${C_BOLD}${C_CYAN}3${C_RESET}) 📋 Show rules" \
+"  ${C_BOLD}${C_CYAN}4${C_RESET}) 🔄 Re-apply iptables" \
+"  ${C_BOLD}${C_CYAN}0${C_RESET}) 🚪 Exit"
+}
+
+ui_section() {
+  local t="$1"
+  echo
+  line_hr "─"
+  echo "${C_BOLD}${C_BLUE}▶ ${t}${C_RESET}"
+  line_hr "─"
+}
+
 main_menu() {
   require_root
   ensure_prereqs
   init_state
-  init_colors
 
   local WAN_IF
   WAN_IF="$(detect_wan_if)"
 
-  # применим правила при старте (как и было)
-  apply_rules "$WAN_IF" >/dev/null 2>&1 || true
+  trap 'echo; warn "Остановлено пользователем (Ctrl+C)."; exit 0' INT
 
-  # ловим Ctrl+C чтобы не вылетать “грязно”
-  trap 'echo; info_msg "Выход."; exit 0' INT
+  if apply_rules "$WAN_IF"; then
+    :
+  else
+    err "Не удалось применить правила при старте."
+  fi
 
   while true; do
-    header "Redirect Manager"
-    status_block "$WAN_IF"
-    hr "─"
+    ui_header "Redirect Manager — DNAT/Forward"
+    ui_status "$WAN_IF"
+    ui_menu
 
-    menu_box
     local c
-    safe_read "Введите пункт (0-4): " c
+    safe_read_ui "${C_BOLD}Выберите пункт (0-4): ${C_RESET}" c
     c="${c//[[:space:]]/}"
 
     case "$c" in
       1)
-        header "Добавление правила"
-        status_block "$WAN_IF"
-        hr "─"
+        ui_header "Add rule"
+        ui_status "$WAN_IF"
+        ui_section "Добавление правила"
         add_rule "$WAN_IF"
-        pause
+        ok "Готово."
+        pause_ui
         ;;
       2)
-        header "Удаление правила"
-        status_block "$WAN_IF"
-        hr "─"
+        ui_header "Delete rule"
+        ui_status "$WAN_IF"
+        ui_section "Удаление правила"
         delete_rule "$WAN_IF"
-        pause
+        ok "Удаление завершено."
+        pause_ui
         ;;
       3)
-        header "Список правил"
-        status_block "$WAN_IF"
-        hr "─"
+        ui_header "Rules"
+        ui_status "$WAN_IF"
+        ui_section "Список правил"
         print_rules
-        pause
+        pause_ui
         ;;
       4)
-        header "Применение правил"
-        status_block "$WAN_IF"
-        hr "─"
+        ui_header "Apply"
+        ui_status "$WAN_IF"
+        ui_section "Применение iptables"
         if apply_rules "$WAN_IF"; then
-          ok_msg "Правила применены."
+          ok "Правила применены успешно."
         else
-          error_msg "Не удалось применить правила (проверь iptables)."
+          err "Ошибка применения iptables. Проверь iptables/nftables."
         fi
-        pause
+        pause_ui
         ;;
-      0|"")
-        info_msg "Выход."
+      0)
+        ui_header "Exit"
+        info "Выход."
         exit 0
         ;;
+      "")
+        warn "Пустой ввод. Выберите 0-4."
+        pause_ui
+        ;;
       *)
-        error_msg "Неверный пункт: '$c'"
-        pause
+        err "Неверный пункт: '${c}'. Введите 0-4."
+        pause_ui
         ;;
     esac
   done
 }
+
+main_menu
