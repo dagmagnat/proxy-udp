@@ -21,6 +21,7 @@ ensure_prereqs() {
   command -v awk >/dev/null 2>&1 || { echo "Не найден awk." >&2; exit 1; }
   command -v nl >/dev/null 2>&1 || { echo "Не найден nl (coreutils)." >&2; exit 1; }
   command -v grep >/dev/null 2>&1 || { echo "Не найден grep." >&2; exit 1; }
+  command -v tput >/dev/null 2>&1 || true
 }
 
 init_state() {
@@ -177,10 +178,8 @@ add_rule() {
 
   local selected_ports=""
   if [[ -z "${ports_in// }" ]]; then
-    # Enter -> только дефолт
     selected_ports="${DEFAULT_PORTS[*]}"
   else
-    # Ввели свои -> только свои (без дефолта)
     selected_ports="$ports_in"
   fi
 
@@ -269,6 +268,73 @@ delete_rule() {
   echo "Удаление выполнено."
 }
 
+# ==========================================================
+# Pretty menu like your screenshot (ASCII + ANSI colors)
+# ==========================================================
+
+CLR_RESET=$'\033[0m'
+CLR_BOLD=$'\033[1m'
+CLR_DIM=$'\033[2m'
+CLR_MAG=$'\033[35m'   # розовый/фиолетовый
+CLR_YELLOW=$'\033[33m'
+CLR_CYAN=$'\033[36m'
+CLR_RED=$'\033[31m'
+CLR_GREEN=$'\033[32m'
+CLR_GRAY=$'\033[90m'
+
+# если не интерактивно — цвета отключаем
+if [[ ! -t 1 ]]; then
+  CLR_RESET=""; CLR_BOLD=""; CLR_DIM=""
+  CLR_MAG=""; CLR_YELLOW=""; CLR_CYAN=""; CLR_RED=""; CLR_GREEN=""; CLR_GRAY=""
+fi
+
+ui_cols() { tput cols 2>/dev/null || echo 80; }
+
+ui_line_dashed() {
+  local w; w="$(ui_cols)"
+  local pattern="=-"
+  local out=""
+  while ((${#out} < w)); do out+="$pattern"; done
+  echo "${out:0:w}"
+}
+
+ui_clear() { command -v clear >/dev/null 2>&1 && clear || printf "\n"; }
+
+ui_center() {
+  local text="$1"
+  local w; w="$(ui_cols)"
+  local len=${#text}
+  if (( len >= w )); then
+    echo "$text"
+  else
+    local pad=$(( (w - len) / 2 ))
+    printf "%*s%s\n" "$pad" "" "$text"
+  fi
+}
+
+ui_header() {
+  local title="$1"
+  ui_clear
+  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+  ui_center "${CLR_BOLD}${CLR_MAG}${title}${CLR_RESET}"
+  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+  echo
+}
+
+ui_status_line() {
+  local wan="$1"
+  local rules
+  rules="$(awk 'NF && $1 !~ /^#/' "$STATE_FILE" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  local now
+  now="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
+  echo "${CLR_DIM}${CLR_GRAY}WAN:${CLR_RESET} ${CLR_BOLD}${CLR_CYAN}${wan}${CLR_RESET}   ${CLR_DIM}${CLR_GRAY}Rules:${CLR_RESET} ${CLR_BOLD}${CLR_GREEN}${rules}${CLR_RESET}   ${CLR_DIM}${CLR_GRAY}Time:${CLR_RESET} ${CLR_DIM}${now}${CLR_RESET}"
+}
+
+pause_ui() {
+  echo
+  read -r -p "${CLR_DIM}Нажмите Enter чтобы продолжить...${CLR_RESET} " _ || true
+}
+
 main_menu() {
   require_root
   ensure_prereqs
@@ -277,27 +343,67 @@ main_menu() {
   local WAN_IF
   WAN_IF="$(detect_wan_if)"
 
-  echo "Интерфейс (WAN): $WAN_IF"
-  echo "Файл правил: $STATE_FILE"
-  echo
+  trap 'echo; exit 0' INT
 
-  apply_rules "$WAN_IF"
+  apply_rules "$WAN_IF" >/dev/null 2>&1 || true
 
   while true; do
+    ui_header "Redirect Manager — DNAT/Forward"
+    ui_status_line "$WAN_IF"
     echo
-    echo "Меню:"
-    echo "1) Добавить"
-    echo "2) Удалить"
-    echo "3) Посмотреть какие есть"
-    echo "0) Выход"
-    read -r -p "Выберите пункт: " c
+
+    # Меню в стиле как на фото (одна строка)
+    echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+    echo -n "1) ${CLR_BOLD}${CLR_CYAN}+${CLR_RESET} Add rule   "
+    echo -n "2) ${CLR_BOLD}${CLR_CYAN}✖${CLR_RESET} Delete rule   "
+    echo -n "3) ${CLR_BOLD}${CLR_CYAN}≡${CLR_RESET} Show rules   "
+    echo -n "4) ${CLR_BOLD}${CLR_CYAN}↻${CLR_RESET} Re-apply iptables   "
+    echo "0) ${CLR_BOLD}${CLR_CYAN}⎋${CLR_RESET} Exit"
+    echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+
+    echo -n "${CLR_BOLD}${CLR_MAG}Выберите пункт (0-4): ${CLR_RESET}"
+    read -r c || c=""
+    c="${c//[[:space:]]/}"
 
     case "$c" in
-      1) add_rule "$WAN_IF" ;;
-      2) delete_rule "$WAN_IF" ;;
-      3) print_rules ;;
-      0) exit 0 ;;
-      *) echo "Неверный выбор." ;;
+      1)
+        ui_header "Add rule"
+        ui_status_line "$WAN_IF"
+        add_rule "$WAN_IF"
+        pause_ui
+        ;;
+      2)
+        ui_header "Delete rule"
+        ui_status_line "$WAN_IF"
+        delete_rule "$WAN_IF"
+        pause_ui
+        ;;
+      3)
+        ui_header "Show rules"
+        ui_status_line "$WAN_IF"
+        echo
+        print_rules
+        pause_ui
+        ;;
+      4)
+        ui_header "Apply rules"
+        ui_status_line "$WAN_IF"
+        echo
+        if apply_rules "$WAN_IF"; then
+          echo "${CLR_GREEN}${CLR_BOLD}OK${CLR_RESET}: правила применены."
+        else
+          echo "${CLR_RED}${CLR_BOLD}ERR${CLR_RESET}: ошибка применения iptables."
+        fi
+        pause_ui
+        ;;
+      0)
+        ui_header "Exit"
+        exit 0
+        ;;
+      *)
+        echo "${CLR_RED}${CLR_BOLD}ERR${CLR_RESET}: неверный выбор: '$c'"
+        sleep 1
+        ;;
     esac
   done
 }
