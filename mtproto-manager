@@ -1,3 +1,263 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF="/etc/mtproto_manager.conf"
+CONTAINER_NAME="mtproto-proxy"
+IMAGE="telegrammessenger/proxy:latest"
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "Запустите от root: sudo $0" >&2
+    exit 1
+  fi
+}
+
+cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+
+cls() {
+  if cmd_exists clear; then
+    clear
+  else
+    printf "\n%.0s" {1..60}
+  fi
+}
+
+pause() {
+  echo
+  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+}
+
+trim() {
+  local s="${1//$'\r'/}"
+  # shellcheck disable=SC2001
+  s="$(echo "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  printf "%s" "$s"
+}
+
+valid_port() {
+  local p
+  p="$(trim "${1:-}")"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( p >= 1 && p <= 65535 )) || return 1
+  [[ "$p" != "80" && "$p" != "443" ]] || return 1
+  return 0
+}
+
+port_free() {
+  local p="$1"
+  if cmd_exists ss; then
+    ! ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
+  elif cmd_exists netstat; then
+    ! netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
+  else
+    return 0
+  fi
+}
+
+pick_random_port() {
+  local tries=0 p
+  while true; do
+    p=$((20000 + (RANDOM % 45000)))  # 20000-64999
+    tries=$((tries + 1))
+    if valid_port "$p" && port_free "$p"; then
+      echo "$p"
+      return 0
+    fi
+    (( tries >= 600 )) && { echo ""; return 1; }
+  done
+}
+
+rand_hex_16bytes() {
+  if cmd_exists openssl; then
+    openssl rand -hex 16
+  else
+    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  fi
+}
+
+ensure_docker() {
+  if cmd_exists docker; then
+    return 0
+  fi
+
+  echo "Docker не найден. Пытаюсь установить (Debian/Ubuntu)..."
+  if cmd_exists apt-get; then
+    apt-get update -y
+    apt-get install -y docker.io
+    systemctl enable --now docker
+  else
+    echo "Автоустановка Docker доступна только на Debian/Ubuntu (apt)." >&2
+    exit 1
+  fi
+
+  cmd_exists docker || { echo "Docker не установился." >&2; exit 1; }
+}
+
+# --- безопасный конфиг без source ---
+CONF_PORT=""
+CONF_KEY=""
+
+conf_reset() { CONF_PORT=""; CONF_KEY=""; }
+
+conf_load() {
+  conf_reset
+  [[ -f "$CONF" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    [[ "$line" == *=* ]] || continue
+
+    local key="${line%%=*}"
+    local val="${line#*=}"
+    key="$(trim "$key")"
+    val="$(trim "$val")"
+
+    case "$key" in
+      PORT) CONF_PORT="$val" ;;
+      KEY)  CONF_KEY="$val" ;;
+      SECRET) CONF_KEY="$val" ;; # совместимость со старым конфигом
+    esac
+  done < "$CONF"
+
+  if [[ -n "$CONF_PORT" ]] && ! valid_port "$CONF_PORT"; then
+    CONF_PORT=""
+  fi
+  if [[ -n "$CONF_KEY" ]] && [[ ! "$CONF_KEY" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    CONF_KEY=""
+  fi
+}
+
+conf_save() {
+  local port="$1" key="$2"
+  cat > "$CONF" <<EOF
+# MTProto Proxy Manager config
+PORT=$port
+KEY=$key
+EOF
+  chmod 600 "$CONF"
+}
+
+open_firewall_iptables() {
+  local port="$1"
+  if cmd_exists iptables; then
+    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+  fi
+}
+
+get_public_ip() {
+  local ip=""
+  if cmd_exists curl; then
+    ip="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 4 https://ifconfig.me 2>/dev/null || true)"
+  elif cmd_exists wget; then
+    ip="$(wget -qO- --timeout=4 https://api.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(wget -qO- --timeout=4 https://ifconfig.me 2>/dev/null || true)"
+  fi
+  echo "$ip"
+}
+
+показать_ссылку() {
+  conf_load
+  if [[ -z "$CONF_PORT" || -z "$CONF_KEY" ]]; then
+    echo "Прокси не настроен. Сначала пункт 1." >&2
+    return 1
+  fi
+
+  local ip
+  ip="$(get_public_ip)"
+
+  echo
+  echo "Данные MTProto Proxy:"
+  echo "Порт : $CONF_PORT"
+  echo "Ключ : dd$CONF_KEY"
+  echo
+
+  if [[ -n "$ip" ]]; then
+    echo "IP сервера: $ip"
+    echo "Ссылка для Telegram:"
+    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=dd${CONF_KEY}"
+  else
+    echo "Не удалось определить публичный IP автоматически."
+    echo "Вставьте IP вручную:"
+    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=dd${CONF_KEY}"
+  fi
+  echo
+}
+
+создать_или_запустить() {
+  ensure_docker
+  conf_load
+
+  local port="$CONF_PORT"
+  local key="$CONF_KEY"
+
+  # если нет конфига — создаём автоматически: порт случайный, ключ случайный
+  if [[ -z "$port" || -z "$key" ]]; then
+    port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 1; }
+    key="$(rand_hex_16bytes)"
+    conf_save "$port" "$key"
+  fi
+
+  # финальная проверка
+  port="$(trim "$port")"
+  if ! valid_port "$port"; then
+    echo "Ошибка: порт некорректен: '$port'" >&2
+    return 1
+  fi
+
+  # удалить контейнер если был
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  fi
+
+  echo "Запускаю MTProto Proxy в Docker..."
+  docker pull "$IMAGE" >/dev/null || true
+
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
+    -p "${port}:443" \
+    -e "SECRET=${key}" \
+    "$IMAGE" >/dev/null
+
+  open_firewall_iptables "$port"
+  echo "MTProto Proxy запущен."
+  показать_ссылку
+}
+
+остановить() {
+  ensure_docker
+  if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    docker stop "$CONTAINER_NAME" >/dev/null
+    echo "Остановлено."
+  else
+    echo "Контейнер не запущен."
+  fi
+}
+
+перезапуск() {
+  остановить || true
+  создать_или_запустить
+}
+
+статус() {
+  ensure_docker
+  conf_load
+  echo
+  docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+  echo
+  if [[ -f "$CONF" ]]; then
+    echo "Конфиг: $CONF"
+    echo "PORT=${CONF_PORT}"
+    echo "KEY=dd${CONF_KEY}"
+  else
+    echo "Конфиг не найден: $CONF"
+  fi
+  echo
+}
+
 изменить_порт() {
   conf_load
   [[ -f "$CONF" && -n "$CONF_KEY" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
@@ -28,3 +288,57 @@
   echo "Чтобы применить — сделайте перезапуск (пункт 3)."
   показать_ссылку
 }
+
+пересоздать_ключ() {
+  conf_load
+  [[ -f "$CONF" && -n "$CONF_PORT" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  local newkey; newkey="$(rand_hex_16bytes)"
+  conf_save "$CONF_PORT" "$newkey"
+  echo "Ключ обновлён. Чтобы применить — перезапустите (пункт 3)."
+  показать_ссылку
+}
+
+удалить_всё() {
+  ensure_docker
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  rm -f "$CONF"
+  echo "Удалено: контейнер и конфиг."
+}
+
+главное_меню() {
+  require_root
+  while true; do
+    echo
+    echo "=========== MTProto Proxy (менеджер) ==========="
+    echo "1) Создать/Запустить MTProto Proxy (порт выбирается автоматически)"
+    echo "2) Остановить"
+    echo "3) Перезапустить"
+    echo "4) Статус"
+    echo "5) Показать ссылку для Telegram"
+    echo "6) Изменить порт"
+    echo "7) Пересоздать ключ"
+    echo "8) Удалить всё (контейнер + конфиг)"
+    echo "0) Выход"
+    echo "================================================"
+    read -r -p "Ваш выбор: " c
+    c="$(trim "$c")"
+
+    cls
+
+    case "$c" in
+      1) создать_или_запустить ; pause ;;
+      2) остановить           ; pause ;;
+      3) перезапуск           ; pause ;;
+      4) статус               ; pause ;;
+      5) показать_ссылку      ; pause ;;
+      6) изменить_порт        ; pause ;;
+      7) пересоздать_ключ     ; pause ;;
+      8) удалить_всё          ; pause ;;
+      0) exit 0 ;;
+      *) echo "Неверный выбор." ; pause ;;
+    esac
+  done
+}
+
+cls
+главное_меню
