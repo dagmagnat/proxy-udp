@@ -14,6 +14,19 @@ require_root() {
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
+cls() {
+  if cmd_exists clear; then
+    clear
+  else
+    printf "\n%.0s" {1..60}
+  fi
+}
+
+pause() {
+  echo
+  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+}
+
 trim() {
   local s="${1//$'\r'/}"
   # shellcheck disable=SC2001
@@ -82,10 +95,9 @@ ensure_docker() {
 
 # --- безопасный конфиг без source ---
 CONF_PORT=""
-CONF_SECRET=""
-CONF_TAG=""
+CONF_KEY=""
 
-conf_reset() { CONF_PORT=""; CONF_SECRET=""; CONF_TAG=""; }
+conf_reset() { CONF_PORT=""; CONF_KEY=""; }
 
 conf_load() {
   conf_reset
@@ -102,27 +114,26 @@ conf_load() {
     val="$(trim "$val")"
 
     case "$key" in
-      PORT)   CONF_PORT="$val" ;;
-      SECRET) CONF_SECRET="$val" ;;
-      TAG)    CONF_TAG="$val" ;;
+      PORT) CONF_PORT="$val" ;;
+      KEY)  CONF_KEY="$val" ;;
+      SECRET) CONF_KEY="$val" ;; # совместимость со старым конфигом
     esac
   done < "$CONF"
 
   if [[ -n "$CONF_PORT" ]] && ! valid_port "$CONF_PORT"; then
     CONF_PORT=""
   fi
-  if [[ -n "$CONF_SECRET" ]] && [[ ! "$CONF_SECRET" =~ ^[0-9a-fA-F]{32}$ ]]; then
-    CONF_SECRET=""
+  if [[ -n "$CONF_KEY" ]] && [[ ! "$CONF_KEY" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    CONF_KEY=""
   fi
 }
 
 conf_save() {
-  local port="$1" secret="$2" tag="$3"
+  local port="$1" key="$2"
   cat > "$CONF" <<EOF
 # MTProto Proxy Manager config
 PORT=$port
-SECRET=$secret
-TAG=$tag
+KEY=$key
 EOF
   chmod 600 "$CONF"
 }
@@ -149,7 +160,7 @@ get_public_ip() {
 
 показать_ссылку() {
   conf_load
-  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then
+  if [[ -z "$CONF_PORT" || -z "$CONF_KEY" ]]; then
     echo "Прокси не настроен. Сначала пункт 1." >&2
     return 1
   fi
@@ -159,19 +170,18 @@ get_public_ip() {
 
   echo
   echo "Данные MTProto Proxy:"
-  echo "Порт  : $CONF_PORT"
-  echo "Секрет: dd$CONF_SECRET"
-  [[ -n "$CONF_TAG" ]] && echo "TAG   : $CONF_TAG"
+  echo "Порт : $CONF_PORT"
+  echo "Ключ : dd$CONF_KEY"
   echo
 
   if [[ -n "$ip" ]]; then
     echo "IP сервера: $ip"
     echo "Ссылка для Telegram:"
-    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=dd${CONF_SECRET}"
+    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=dd${CONF_KEY}"
   else
     echo "Не удалось определить публичный IP автоматически."
     echo "Вставьте IP вручную:"
-    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=dd${CONF_SECRET}"
+    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=dd${CONF_KEY}"
   fi
   echo
 }
@@ -181,15 +191,13 @@ get_public_ip() {
   conf_load
 
   local port="$CONF_PORT"
-  local secret="$CONF_SECRET"
-  local tag="$CONF_TAG"
+  local key="$CONF_KEY"
 
-  # если нет конфига — создаём автоматически: порт случайный, секрет случайный
-  if [[ -z "$port" || -z "$secret" ]]; then
+  # если нет конфига — создаём автоматически: порт случайный, ключ случайный
+  if [[ -z "$port" || -z "$key" ]]; then
     port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 1; }
-    secret="$(rand_hex_16bytes)"
-    tag="$tag"
-    conf_save "$port" "$secret" "$tag"
+    key="$(rand_hex_16bytes)"
+    conf_save "$port" "$key"
   fi
 
   # финальная проверка
@@ -207,22 +215,12 @@ get_public_ip() {
   echo "Запускаю MTProto Proxy в Docker..."
   docker pull "$IMAGE" >/dev/null || true
 
-  if [[ -n "$tag" ]]; then
-    docker run -d \
-      --name "$CONTAINER_NAME" \
-      --restart unless-stopped \
-      -p "${port}:443" \
-      -e "SECRET=${secret}" \
-      -e "TAG=${tag}" \
-      "$IMAGE" >/dev/null
-  else
-    docker run -d \
-      --name "$CONTAINER_NAME" \
-      --restart unless-stopped \
-      -p "${port}:443" \
-      -e "SECRET=${secret}" \
-      "$IMAGE" >/dev/null
-  fi
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
+    -p "${port}:443" \
+    -e "SECRET=${key}" \
+    "$IMAGE" >/dev/null
 
   open_firewall_iptables "$port"
   echo "MTProto Proxy запущен."
@@ -253,30 +251,20 @@ get_public_ip() {
   if [[ -f "$CONF" ]]; then
     echo "Конфиг: $CONF"
     echo "PORT=${CONF_PORT}"
-    echo "SECRET=dd${CONF_SECRET}"
-    [[ -n "$CONF_TAG" ]] && echo "TAG=${CONF_TAG}"
+    echo "KEY=dd${CONF_KEY}"
   else
     echo "Конфиг не найден: $CONF"
   fi
   echo
 }
 
-пересоздать_секрет() {
+пересоздать_ключ() {
   conf_load
   [[ -f "$CONF" && -n "$CONF_PORT" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
-  local newsecret; newsecret="$(rand_hex_16bytes)"
-  conf_save "$CONF_PORT" "$newsecret" "$CONF_TAG"
-  echo "Секрет обновлён. Чтобы применить — перезапустите (пункт 3)."
+  local newkey; newkey="$(rand_hex_16bytes)"
+  conf_save "$CONF_PORT" "$newkey"
+  echo "Ключ обновлён. Чтобы применить — перезапустите (пункт 3)."
   показать_ссылку
-}
-
-tag_задать() {
-  conf_load
-  [[ -f "$CONF" && -n "$CONF_PORT" && -n "$CONF_SECRET" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
-  read -r -p "Введите TAG (пусто — очистить): " newtag
-  newtag="$(trim "$newtag")"
-  conf_save "$CONF_PORT" "$CONF_SECRET" "$newtag"
-  echo "TAG обновлён. Чтобы применить — перезапустите (пункт 3)."
 }
 
 удалить_всё() {
@@ -296,28 +284,28 @@ tag_задать() {
     echo "3) Перезапустить"
     echo "4) Статус"
     echo "5) Показать ссылку для Telegram"
-    echo "6) (Убрано) Изменить порт"
-    echo "7) Пересоздать секрет"
-    echo "8) Задать/очистить TAG"
-    echo "9) Удалить всё (контейнер + конфиг)"
+    echo "6) Пересоздать ключ"
+    echo "7) Удалить всё (контейнер + конфиг)"
     echo "0) Выход"
     echo "================================================"
     read -r -p "Ваш выбор: " c
     c="$(trim "$c")"
 
+    cls
+
     case "$c" in
-      1) создать_или_запустить ;;
-      2) остановить ;;
-      3) перезапуск ;;
-      4) статус ;;
-      5) показать_ссылку ;;
-      7) пересоздать_секрет ;;
-      8) tag_задать ;;
-      9) удалить_всё ;;
+      1) создать_или_запустить ; pause ;;
+      2) остановить           ; pause ;;
+      3) перезапуск           ; pause ;;
+      4) статус               ; pause ;;
+      5) показать_ссылку      ; pause ;;
+      6) пересоздать_ключ     ; pause ;;
+      7) удалить_всё          ; pause ;;
       0) exit 0 ;;
-      *) echo "Неверный выбор." ;;
+      *) echo "Неверный выбор." ; pause ;;
     esac
   done
 }
 
+cls
 главное_меню
