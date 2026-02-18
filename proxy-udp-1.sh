@@ -269,6 +269,11 @@ delete_rule() {
 # Pretty UI (colors + boxes)
 # =========================
 
+# =========================
+# Pretty UI (colors + boxes) — UTF8/ASCII fallback
+# =========================
+
+# ANSI цвета
 C_RESET=$'\033[0m'
 C_BOLD=$'\033[1m'
 C_DIM=$'\033[2m'
@@ -281,9 +286,38 @@ C_MAG=$'\033[35m'
 C_CYAN=$'\033[36m'
 C_GRAY=$'\033[90m'
 
+# если нет TTY — отключаем цвета
 if [[ ! -t 1 ]]; then
   C_RESET=""; C_BOLD=""; C_DIM=""
   C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_MAG=""; C_CYAN=""; C_GRAY=""
+fi
+
+# --- Detect UTF-8 support
+is_utf8() {
+  local cm=""
+  cm="$(LC_ALL=${LC_ALL:-} LANG=${LANG:-} locale charmap 2>/dev/null || true)"
+  [[ "${cm^^}" == *"UTF-8"* || "${cm^^}" == *"UTF8"* ]]
+}
+
+UI_UTF8=0
+if is_utf8; then UI_UTF8=1; fi
+
+# --- Charset (box drawing)
+# Unicode (если терминал норм) / ASCII (если в web-консоли квадраты/▒)
+if (( UI_UTF8 == 1 )); then
+  B_TL="┌"; B_TR="┐"; B_BL="└"; B_BR="┘"
+  B_V="│"; B_H="─"
+  B_LJ="├"; B_RJ="┤"; B_TJ="┬"; B_BJ="┴"; B_X="┼"
+  HR_THICK="═"
+  EMOJI_OK="✔"; EMOJI_WARN="⚠"; EMOJI_ERR="✖"; EMOJI_INFO="ℹ"
+  ICON_ADD="➕"; ICON_DEL="🗑"; ICON_LIST="📋"; ICON_APPLY="🔄"; ICON_EXIT="🚪"
+else
+  B_TL="+"; B_TR="+"; B_BL="+"; B_BR="+"
+  B_V="|"; B_H="-"
+  B_LJ="+"; B_RJ="+"; B_TJ="+"; B_BJ="+"; B_X="+"
+  HR_THICK="="
+  EMOJI_OK="OK"; EMOJI_WARN="WARN"; EMOJI_ERR="ERR"; EMOJI_INFO="INFO"
+  ICON_ADD="+"; ICON_DEL="x"; ICON_LIST="*"; ICON_APPLY="~"; ICON_EXIT=">"
 fi
 
 term_cols() {
@@ -299,7 +333,7 @@ repeat_char() {
 }
 
 line_hr() {
-  local ch="${1:-─}"
+  local ch="${1:-$B_H}"
   repeat_char "$ch" "$(term_cols)"
   echo
 }
@@ -320,10 +354,10 @@ clear_ui() {
   command -v clear >/dev/null 2>&1 && clear || printf "\n\n"
 }
 
-ok()    { echo "${C_GREEN}${C_BOLD}✔${C_RESET} $*"; }
-warn()  { echo "${C_YELLOW}${C_BOLD}⚠${C_RESET} $*"; }
-err()   { echo "${C_RED}${C_BOLD}✖${C_RESET} $*" >&2; }
-info()  { echo "${C_CYAN}${C_BOLD}ℹ${C_RESET} $*"; }
+ok()    { echo "${C_GREEN}${C_BOLD}${EMOJI_OK}${C_RESET} $*"; }
+warn()  { echo "${C_YELLOW}${C_BOLD}${EMOJI_WARN}${C_RESET} $*"; }
+err()   { echo "${C_RED}${C_BOLD}${EMOJI_ERR}${C_RESET} $*" >&2; }
+info()  { echo "${C_CYAN}${C_BOLD}${EMOJI_INFO}${C_RESET} $*"; }
 
 pause_ui() {
   echo
@@ -344,9 +378,9 @@ count_rules() {
 ui_header() {
   local title="$1"
   clear_ui
-  line_hr "═"
+  line_hr "$HR_THICK"
   center_text "${C_BOLD}${C_MAG}${title}${C_RESET}"
-  line_hr "═"
+  line_hr "$HR_THICK"
 }
 
 ui_box() {
@@ -355,15 +389,15 @@ ui_box() {
   local inner=$(( w - 4 ))
   (( inner < 20 )) && inner=20
 
-  echo "${C_GRAY}┌$(repeat_char "─" $((w-2)))┐${C_RESET}"
-  printf "${C_GRAY}│${C_RESET} ${C_BOLD}${C_CYAN}%-*s${C_RESET} ${C_GRAY}│${C_RESET}\n" "$inner" "$title"
-  echo "${C_GRAY}├$(repeat_char "─" $((w-2)))┤${C_RESET}"
+  echo "${C_GRAY}${B_TL}$(repeat_char "$B_H" $((w-2)))${B_TR}${C_RESET}"
+  printf "${C_GRAY}${B_V}${C_RESET} ${C_BOLD}${C_CYAN}%-*s${C_RESET} ${C_GRAY}${B_V}${C_RESET}\n" "$inner" "$title"
+  echo "${C_GRAY}${B_LJ}$(repeat_char "$B_H" $((w-2)))${B_RJ}${C_RESET}"
 
   while IFS= read -r line; do
-    printf "${C_GRAY}│${C_RESET} %-*s ${C_GRAY}│${C_RESET}\n" "$inner" "$line"
+    printf "${C_GRAY}${B_V}${C_RESET} %-*s ${C_GRAY}${B_V}${C_RESET}\n" "$inner" "$line"
   done < <(printf "%s\n" "$*")
 
-  echo "${C_GRAY}└$(repeat_char "─" $((w-2)))┘${C_RESET}"
+  echo "${C_GRAY}${B_BL}$(repeat_char "$B_H" $((w-2)))${B_BR}${C_RESET}"
 }
 
 ui_status() {
@@ -381,19 +415,19 @@ ui_status() {
 
 ui_menu() {
   ui_box "MENU" \
-"  ${C_BOLD}${C_CYAN}1${C_RESET}) ➕ Add rule" \
-"  ${C_BOLD}${C_CYAN}2${C_RESET}) 🗑  Delete rule" \
-"  ${C_BOLD}${C_CYAN}3${C_RESET}) 📋 Show rules" \
-"  ${C_BOLD}${C_CYAN}4${C_RESET}) 🔄 Re-apply iptables" \
-"  ${C_BOLD}${C_CYAN}0${C_RESET}) 🚪 Exit"
+"  ${C_BOLD}${C_CYAN}1${C_RESET}) ${ICON_ADD} Add rule" \
+"  ${C_BOLD}${C_CYAN}2${C_RESET}) ${ICON_DEL} Delete rule" \
+"  ${C_BOLD}${C_CYAN}3${C_RESET}) ${ICON_LIST} Show rules" \
+"  ${C_BOLD}${C_CYAN}4${C_RESET}) ${ICON_APPLY} Re-apply iptables" \
+"  ${C_BOLD}${C_CYAN}0${C_RESET}) ${ICON_EXIT} Exit"
 }
 
 ui_section() {
   local t="$1"
   echo
-  line_hr "─"
-  echo "${C_BOLD}${C_BLUE}▶ ${t}${C_RESET}"
-  line_hr "─"
+  line_hr
+  echo "${C_BOLD}${C_BLUE}> ${t}${C_RESET}"
+  line_hr
 }
 
 main_menu() {
