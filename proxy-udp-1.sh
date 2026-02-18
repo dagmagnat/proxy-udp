@@ -1,99 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== Pretty UI (ASCII) =====
-# Стиль как на скрине: пунктирные линии, розовый заголовок, подсветка пунктов.
-# Работает в "кривых" веб-консолях (без unicode рамок).
-
-# Цвета (ANSI)
-CLR_RESET=$'\033[0m'
-CLR_BOLD=$'\033[1m'
-CLR_DIM=$'\033[2m'
-
-CLR_RED=$'\033[31m'
-CLR_GREEN=$'\033[32m'
-CLR_YELLOW=$'\033[33m'
-CLR_BLUE=$'\033[34m'
-CLR_MAG=$'\033[35m'   # розово-фиолетовый
-CLR_CYAN=$'\033[36m'
-CLR_GRAY=$'\033[90m'
-
-# Если нет TTY — отключаем цвета
-if [[ ! -t 1 ]]; then
-  CLR_RESET=""; CLR_BOLD=""; CLR_DIM=""
-  CLR_RED=""; CLR_GREEN=""; CLR_YELLOW=""; CLR_BLUE=""; CLR_MAG=""; CLR_CYAN=""; CLR_GRAY=""
-fi
-
-ui_cols() { tput cols 2>/dev/null || echo 80; }
-
-ui_repeat() { local ch="$1" n="$2"; printf "%*s" "$n" "" | tr " " "$ch"; }
-
-ui_line_dashed() {
-  # "=-" повторяется по ширине — выглядит как пунктир
-  local w; w="$(ui_cols)"
-  local pattern="=-"
-  local out=""
-  while ((${#out} < w)); do out+="$pattern"; done
-  echo "${out:0:w}"
-}
-
-ui_clear() { command -v clear >/dev/null 2>&1 && clear || printf "\n"; }
-
-ui_center() {
-  local text="$1"
-  local w; w="$(ui_cols)"
-  local len=${#text}
-  if (( len >= w )); then
-    echo "$text"
-  else
-    local pad=$(( (w - len) / 2 ))
-    printf "%*s%s\n" "$pad" "" "$text"
-  fi
-}
-
-ui_header() {
-  local title="$1"
-  ui_clear
-  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
-  ui_center "${CLR_BOLD}${CLR_MAG}${title}${CLR_RESET}"
-  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
-  echo
-}
-
-ui_item() {
-  # ui_item "1" "Текст" "accent"
-  local key="$1"; shift
-  local text="$1"; shift || true
-  local accent="${1:-mag}"
-
-  local color="$CLR_MAG"
-  [[ "$accent" == "yellow" ]] && color="$CLR_YELLOW"
-  [[ "$accent" == "green"  ]] && color="$CLR_GREEN"
-  [[ "$accent" == "cyan"   ]] && color="$CLR_CYAN"
-  [[ "$accent" == "red"    ]] && color="$CLR_RED"
-
-  printf " %s) %s%s%s\n" \
-    "${CLR_BOLD}${color}${key}${CLR_RESET}" \
-    "${color}" "$text" "${CLR_RESET}"
-}
-
-ui_tip() {
-  echo
-  echo "${CLR_DIM}${CLR_GRAY}$*${CLR_RESET}"
-}
-
-ui_prompt() {
-  local varname="$1"
-  local ans=""
-  printf "\n${CLR_BOLD}${CLR_MAG}Ваш выбор:${CLR_RESET} "
-  read -r ans || ans=""
-  printf -v "$varname" "%s" "$ans"
-}
-
-ui_ok()   { echo "${CLR_GREEN}${CLR_BOLD}[OK]${CLR_RESET} $*"; }
-ui_warn() { echo "${CLR_YELLOW}${CLR_BOLD}[!]${CLR_RESET} $*"; }
-ui_err()  { echo "${CLR_RED}${CLR_BOLD}[X]${CLR_RESET} $*" >&2; }
-
 STATE_FILE="/etc/redirect_manager.rules"
 CHAIN_NAT="REDIR_MGR"
 CHAIN_FWD="REDIR_MGR_FWD"
@@ -212,6 +119,7 @@ print_rules() {
   nl -w2 -s') ' "$STATE_FILE"
 }
 
+# меню в stderr, результат в stdout
 choose_protocol_menu() {
   while true; do
     echo "" >&2
@@ -269,11 +177,14 @@ add_rule() {
 
   local selected_ports=""
   if [[ -z "${ports_in// }" ]]; then
+    # Enter -> только дефолт
     selected_ports="${DEFAULT_PORTS[*]}"
   else
+    # Ввели свои -> только свои (без дефолта)
     selected_ports="$ports_in"
   fi
 
+  # очистка/валидация
   local cleaned=""
   for p in $selected_ports; do
     if valid_port "$p"; then
@@ -358,171 +269,6 @@ delete_rule() {
   echo "Удаление выполнено."
 }
 
-# =========================
-# Pretty UI (colors + boxes)
-# =========================
-
-# =========================
-# Pretty UI (colors + boxes) — UTF8/ASCII fallback
-# =========================
-
-# ANSI цвета
-C_RESET=$'\033[0m'
-C_BOLD=$'\033[1m'
-C_DIM=$'\033[2m'
-
-C_RED=$'\033[31m'
-C_GREEN=$'\033[32m'
-C_YELLOW=$'\033[33m'
-C_BLUE=$'\033[34m'
-C_MAG=$'\033[35m'
-C_CYAN=$'\033[36m'
-C_GRAY=$'\033[90m'
-
-# если нет TTY — отключаем цвета
-if [[ ! -t 1 ]]; then
-  C_RESET=""; C_BOLD=""; C_DIM=""
-  C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_MAG=""; C_CYAN=""; C_GRAY=""
-fi
-
-# --- Detect UTF-8 support
-is_utf8() {
-  local cm=""
-  cm="$(LC_ALL=${LC_ALL:-} LANG=${LANG:-} locale charmap 2>/dev/null || true)"
-  [[ "${cm^^}" == *"UTF-8"* || "${cm^^}" == *"UTF8"* ]]
-}
-
-UI_UTF8=0
-if is_utf8; then UI_UTF8=1; fi
-
-# --- Charset (box drawing)
-# Unicode (если терминал норм) / ASCII (если в web-консоли квадраты/▒)
-if (( UI_UTF8 == 1 )); then
-  B_TL="┌"; B_TR="┐"; B_BL="└"; B_BR="┘"
-  B_V="│"; B_H="─"
-  B_LJ="├"; B_RJ="┤"; B_TJ="┬"; B_BJ="┴"; B_X="┼"
-  HR_THICK="═"
-  EMOJI_OK="✔"; EMOJI_WARN="⚠"; EMOJI_ERR="✖"; EMOJI_INFO="ℹ"
-  ICON_ADD="➕"; ICON_DEL="🗑"; ICON_LIST="📋"; ICON_APPLY="🔄"; ICON_EXIT="🚪"
-else
-  B_TL="+"; B_TR="+"; B_BL="+"; B_BR="+"
-  B_V="|"; B_H="-"
-  B_LJ="+"; B_RJ="+"; B_TJ="+"; B_BJ="+"; B_X="+"
-  HR_THICK="="
-  EMOJI_OK="OK"; EMOJI_WARN="WARN"; EMOJI_ERR="ERR"; EMOJI_INFO="INFO"
-  ICON_ADD="+"; ICON_DEL="x"; ICON_LIST="*"; ICON_APPLY="~"; ICON_EXIT=">"
-fi
-
-term_cols() {
-  local c
-  c="$(tput cols 2>/dev/null || echo 80)"
-  (( c < 60 )) && c=60
-  echo "$c"
-}
-
-repeat_char() {
-  local ch="$1" n="$2"
-  printf "%*s" "$n" "" | tr " " "$ch"
-}
-
-line_hr() {
-  local ch="${1:-$B_H}"
-  repeat_char "$ch" "$(term_cols)"
-  echo
-}
-
-center_text() {
-  local text="$1"
-  local w; w="$(term_cols)"
-  local len=${#text}
-  if (( len >= w )); then
-    echo "$text"
-  else
-    local pad=$(( (w - len) / 2 ))
-    printf "%*s%s\n" "$pad" "" "$text"
-  fi
-}
-
-clear_ui() {
-  command -v clear >/dev/null 2>&1 && clear || printf "\n\n"
-}
-
-ok()    { echo "${C_GREEN}${C_BOLD}${EMOJI_OK}${C_RESET} $*"; }
-warn()  { echo "${C_YELLOW}${C_BOLD}${EMOJI_WARN}${C_RESET} $*"; }
-err()   { echo "${C_RED}${C_BOLD}${EMOJI_ERR}${C_RESET} $*" >&2; }
-info()  { echo "${C_CYAN}${C_BOLD}${EMOJI_INFO}${C_RESET} $*"; }
-
-pause_ui() {
-  echo
-  read -r -p "${C_DIM}Нажмите Enter чтобы продолжить...${C_RESET} " _ || true
-}
-
-safe_read_ui() {
-  local prompt="$1" var="$2" ans=""
-  read -r -p "$prompt" ans || ans=""
-  printf -v "$var" "%s" "$ans"
-}
-
-count_rules() {
-  [[ -f "$STATE_FILE" ]] || { echo 0; return; }
-  awk 'NF && $1 !~ /^#/' "$STATE_FILE" 2>/dev/null | wc -l | tr -d ' '
-}
-
-ui_header() {
-  local title="$1"
-  clear_ui
-  line_hr "$HR_THICK"
-  center_text "${C_BOLD}${C_MAG}${title}${C_RESET}"
-  line_hr "$HR_THICK"
-}
-
-ui_box() {
-  local title="$1"; shift
-  local w; w="$(term_cols)"
-  local inner=$(( w - 4 ))
-  (( inner < 20 )) && inner=20
-
-  echo "${C_GRAY}${B_TL}$(repeat_char "$B_H" $((w-2)))${B_TR}${C_RESET}"
-  printf "${C_GRAY}${B_V}${C_RESET} ${C_BOLD}${C_CYAN}%-*s${C_RESET} ${C_GRAY}${B_V}${C_RESET}\n" "$inner" "$title"
-  echo "${C_GRAY}${B_LJ}$(repeat_char "$B_H" $((w-2)))${B_RJ}${C_RESET}"
-
-  while IFS= read -r line; do
-    printf "${C_GRAY}${B_V}${C_RESET} %-*s ${C_GRAY}${B_V}${C_RESET}\n" "$inner" "$line"
-  done < <(printf "%s\n" "$*")
-
-  echo "${C_GRAY}${B_BL}$(repeat_char "$B_H" $((w-2)))${B_BR}${C_RESET}"
-}
-
-ui_status() {
-  local wan="$1"
-  local rules; rules="$(count_rules)"
-  local now; now="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)"
-
-  local s1="WAN: ${C_BOLD}${C_CYAN}${wan}${C_RESET}   Rules: ${C_BOLD}${C_GREEN}${rules}${C_RESET}"
-  local s2="State: ${STATE_FILE}"
-  local s3="Chains: nat/${CHAIN_NAT}  filter/${CHAIN_FWD}"
-  local s4="Time: ${C_DIM}${now}${C_RESET}"
-
-  ui_box "STATUS" "$s1" "$s2" "$s3" "$s4"
-}
-
-ui_menu() {
-  ui_box "MENU" \
-"  ${C_BOLD}${C_CYAN}1${C_RESET}) ${ICON_ADD} Add rule" \
-"  ${C_BOLD}${C_CYAN}2${C_RESET}) ${ICON_DEL} Delete rule" \
-"  ${C_BOLD}${C_CYAN}3${C_RESET}) ${ICON_LIST} Show rules" \
-"  ${C_BOLD}${C_CYAN}4${C_RESET}) ${ICON_APPLY} Re-apply iptables" \
-"  ${C_BOLD}${C_CYAN}0${C_RESET}) ${ICON_EXIT} Exit"
-}
-
-ui_section() {
-  local t="$1"
-  echo
-  line_hr
-  echo "${C_BOLD}${C_BLUE}> ${t}${C_RESET}"
-  line_hr
-}
-
 main_menu() {
   require_root
   ensure_prereqs
@@ -531,71 +277,27 @@ main_menu() {
   local WAN_IF
   WAN_IF="$(detect_wan_if)"
 
-  trap 'echo; warn "Остановлено пользователем (Ctrl+C)."; exit 0' INT
+  echo "Интерфейс (WAN): $WAN_IF"
+  echo "Файл правил: $STATE_FILE"
+  echo
 
-  if apply_rules "$WAN_IF"; then
-    :
-  else
-    err "Не удалось применить правила при старте."
-  fi
+  apply_rules "$WAN_IF"
 
   while true; do
-    ui_header "Redirect Manager — DNAT/Forward"
-    ui_status "$WAN_IF"
-    ui_menu
-
-    local c
-    safe_read_ui "${C_BOLD}Выберите пункт (0-4): ${C_RESET}" c
-    c="${c//[[:space:]]/}"
+    echo
+    echo "Меню:"
+    echo "1) Добавить"
+    echo "2) Удалить"
+    echo "3) Посмотреть какие есть"
+    echo "0) Выход"
+    read -r -p "Выберите пункт: " c
 
     case "$c" in
-      1)
-        ui_header "Add rule"
-        ui_status "$WAN_IF"
-        ui_section "Добавление правила"
-        add_rule "$WAN_IF"
-        ok "Готово."
-        pause_ui
-        ;;
-      2)
-        ui_header "Delete rule"
-        ui_status "$WAN_IF"
-        ui_section "Удаление правила"
-        delete_rule "$WAN_IF"
-        ok "Удаление завершено."
-        pause_ui
-        ;;
-      3)
-        ui_header "Rules"
-        ui_status "$WAN_IF"
-        ui_section "Список правил"
-        print_rules
-        pause_ui
-        ;;
-      4)
-        ui_header "Apply"
-        ui_status "$WAN_IF"
-        ui_section "Применение iptables"
-        if apply_rules "$WAN_IF"; then
-          ok "Правила применены успешно."
-        else
-          err "Ошибка применения iptables. Проверь iptables/nftables."
-        fi
-        pause_ui
-        ;;
-      0)
-        ui_header "Exit"
-        info "Выход."
-        exit 0
-        ;;
-      "")
-        warn "Пустой ввод. Выберите 0-4."
-        pause_ui
-        ;;
-      *)
-        err "Неверный пункт: '${c}'. Введите 0-4."
-        pause_ui
-        ;;
+      1) add_rule "$WAN_IF" ;;
+      2) delete_rule "$WAN_IF" ;;
+      3) print_rules ;;
+      0) exit 0 ;;
+      *) echo "Неверный выбор." ;;
     esac
   done
 }
