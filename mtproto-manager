@@ -29,8 +29,7 @@ pause() {
 
 trim() {
   local s="${1//$'\r'/}"
-  # shellcheck disable=SC2001
-  s="$(echo "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  s="$(printf "%s" "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   printf "%s" "$s"
 }
 
@@ -38,6 +37,7 @@ trim() {
 valid_port() {
   local p
   p="$(trim "${1:-}")"
+  [[ -n "$p" ]] || return 1
   [[ "$p" =~ ^[0-9]+$ ]] || return 1
   (( p >= 1 && p <= 65535 )) || return 1
   return 0
@@ -158,39 +158,17 @@ get_public_ip() {
   echo "$ip"
 }
 
-ask_port_if_busy_default_443() {
-  local port="443"
-  if port_free "$port"; then
-    echo "$port"
-    return 0
-  fi
-
+banner_random_due_busy() {
+  local preferred="$1"
+  local chosen="$2"
   echo
-  echo "Порт 443 занят на сервере."
-  echo "Рекомендуется использовать 443, но можно выбрать любой свободный."
-  while true; do
-    read -r -p "Введите другой порт (или Enter для случайного свободного): " port
-    port="$(trim "${port:-}")"
-
-    if [[ -z "$port" ]]; then
-      port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 1; }
-      echo "$port"
-      return 0
-    fi
-
-    if ! valid_port "$port"; then
-      echo "Неверный порт: '$port'"
-      continue
-    fi
-
-    if ! port_free "$port"; then
-      echo "Порт $port занят. Выберите другой."
-      continue
-    fi
-
-    echo "$port"
-    return 0
-  done
+  echo "############################################################"
+  echo "######################  ПОРТ ЗАНЯТ!  #######################"
+  echo "############################################################"
+  echo "Порт $preferred занят на сервере."
+  echo "Поэтому будет установлен СЛУЧАЙНЫЙ свободный порт: $chosen"
+  echo "Вы всегда можете сменить порт: 6) Изменить порт"
+  echo
 }
 
 показать_ссылку() {
@@ -225,25 +203,45 @@ ask_port_if_busy_default_443() {
   ensure_docker
   conf_load
 
-  local port="$CONF_PORT"
-  local key="$CONF_KEY"
+  local port="${CONF_PORT:-}"
+  local key="${CONF_KEY:-}"
 
-  # если нет ключа — создаём
+  # ключ
   if [[ -z "$key" ]]; then
     key="$(rand_hex_16bytes)"
   fi
 
-  # если нет порта — по умолчанию пытаемся 443, если занят — спрашиваем/подбираем
+  # если порта нет в конфиге — по умолчанию хотим 443
+  # если 443 занят — ставим случайный свободный, сообщаем, сохраняем и продолжаем
   if [[ -z "$port" ]]; then
-    port="$(ask_port_if_busy_default_443)" || return 1
+    local preferred="443"
+    if port_free "$preferred"; then
+      port="$preferred"
+    else
+      port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 0; }
+      banner_random_due_busy "$preferred" "$port"
+    fi
     conf_save "$port" "$key"
   fi
 
-  # финальная проверка
+  # нормализуем порт и проверяем
   port="$(trim "$port")"
   if ! valid_port "$port"; then
     echo "Ошибка: порт некорректен: '$port'" >&2
-    return 1
+    echo "Выберите: 6) Изменить порт" >&2
+    return 0
+  fi
+
+  # если порт из конфига занят — не падаем, а предлагаем сменить порт
+  if ! port_free "$port"; then
+    echo
+    echo "############################################################"
+    echo "######################  ПОРТ ЗАНЯТ!  #######################"
+    echo "############################################################"
+    echo "Порт $port занят на сервере."
+    echo "Смените порт: 6) Изменить порт"
+    echo
+    return 0
   fi
 
   # удалить контейнер если был
@@ -299,7 +297,7 @@ ask_port_if_busy_default_443() {
 
 изменить_порт() {
   conf_load
-  [[ -f "$CONF" && -n "$CONF_KEY" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  [[ -f "$CONF" && -n "$CONF_KEY" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 0; }
 
   local newport
   while true; do
@@ -314,6 +312,10 @@ ask_port_if_busy_default_443() {
     fi
 
     if ! port_free "$newport"; then
+      echo
+      echo "############################################################"
+      echo "######################  ПОРТ ЗАНЯТ!  #######################"
+      echo "############################################################"
       echo "Порт $newport занят. Выберите другой."
       continue
     fi
@@ -330,7 +332,7 @@ ask_port_if_busy_default_443() {
 
 пересоздать_ключ() {
   conf_load
-  [[ -f "$CONF" && -n "$CONF_PORT" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  [[ -f "$CONF" && -n "$CONF_PORT" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 0; }
   local newkey; newkey="$(rand_hex_16bytes)"
   conf_save "$CONF_PORT" "$newkey"
   echo "Ключ обновлён. Чтобы применить — перезапустите (пункт 3)."
