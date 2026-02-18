@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =========================
+# MTProto Proxy Manager (RU)
+# =========================
+
 CONF="/etc/mtproto_manager.conf"
 CONTAINER_NAME="mtproto-proxy"
 IMAGE="telegrammessenger/proxy:latest"
 
-# --- helpers ---
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Запустите от root: sudo $0" >&2
@@ -24,38 +27,37 @@ valid_port() {
 
 port_allowed() {
   local p="$1"
-  # запрещаем 80/443 и низкие порты (можно оставить, но безопаснее)
+  # Запрещаем 80 и 443 (как вы попросили)
   [[ "$p" != "80" && "$p" != "443" ]] || return 1
   return 0
 }
 
 port_free() {
   local p="$1"
-  # проверка занятости порта (tcp listen)
+  # Проверяем, что порт не занят (TCP LISTEN)
   if cmd_exists ss; then
     ! ss -lnt "( sport = :$p )" 2>/dev/null | grep -q ":$p"
   elif cmd_exists netstat; then
     ! netstat -lnt 2>/dev/null | awk '{print $4}' | grep -q ":$p$"
   else
-    # fallback: best-effort
+    # если нечем проверять — пропускаем (best effort)
     return 0
   fi
 }
 
-rand_hex() {
-  # 16 bytes => 32 hex
+rand_hex_16bytes() {
+  # 16 bytes => 32 hex-символа
   if cmd_exists openssl; then
     openssl rand -hex 16
   else
-    # fallback /dev/urandom
     head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
   fi
 }
 
 choose_port() {
   echo
-  echo "Выбор порта для MTProto-proxy (TCP)."
-  echo "80 и 443 запрещены."
+  echo "Выбор порта для MTProto Proxy (TCP)."
+  echo "Порты 80 и 443 запрещены."
   echo "1) Случайный свободный порт (рекомендуется)"
   echo "2) Указать свой порт"
   echo "0) Назад"
@@ -66,14 +68,14 @@ choose_port() {
     1)
       local p tries=0
       while true; do
-        # диапазон 20000-65000 чтобы реже конфликтовать
+        # диапазон 20000-65000, чтобы реже конфликтовать
         p=$((20000 + (RANDOM % 45000)))
-        tries=$((tries+1))
+        tries=$((tries + 1))
         if valid_port "$p" && port_allowed "$p" && port_free "$p"; then
           echo "$p"
           return 0
         fi
-        ((tries >= 200)) && { echo "Не смог подобрать свободный порт." >&2; return 1; }
+        (( tries >= 200 )) && { echo "Не смог подобрать свободный порт." >&2; return 1; }
       done
       ;;
     2)
@@ -85,8 +87,14 @@ choose_port() {
       echo "$p"
       return 0
       ;;
-    0) echo "back"; return 0 ;;
-    *) echo "Неверный выбор." >&2; return 1 ;;
+    0)
+      echo "back"
+      return 0
+      ;;
+    *)
+      echo "Неверный выбор." >&2
+      return 1
+      ;;
   esac
 }
 
@@ -133,14 +141,12 @@ load_conf() {
     PORT=""
     SECRET=""
     TAG=""
-    CONTAINER="$CONTAINER_NAME"
-    IMAGE="$IMAGE"
   fi
 }
 
 open_firewall_iptables() {
   local port="$1"
-  # best-effort open input tcp port
+  # Открываем TCP порт в iptables (best effort)
   if cmd_exists iptables; then
     iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
       iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
@@ -148,7 +154,6 @@ open_firewall_iptables() {
 }
 
 get_public_ip() {
-  # best-effort: curl to multiple endpoints
   local ip=""
   if cmd_exists curl; then
     ip="$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)"
@@ -160,7 +165,7 @@ get_public_ip() {
   echo "$ip"
 }
 
-print_link() {
+показать_ссылку() {
   load_conf
   if [[ -z "${PORT:-}" || -z "${SECRET:-}" ]]; then
     echo "Прокси не настроен (нет конфигурации)." >&2
@@ -169,26 +174,29 @@ print_link() {
 
   local ip
   ip="$(get_public_ip)"
-  if [[ -z "$ip" ]]; then
+
+  echo
+  echo "Данные MTProto Proxy:"
+  echo "Порт  : $PORT"
+  echo "Секрет: dd$SECRET"
+  [[ -n "${TAG:-}" ]] && echo "TAG   : $TAG"
+  echo
+
+  if [[ -n "$ip" ]]; then
+    echo "IP сервера: $ip"
+    echo
+    echo "Ссылка для Telegram:"
+    echo "tg://proxy?server=${ip}&port=${PORT}&secret=dd${SECRET}"
+  else
     echo "Не удалось определить публичный IP автоматически."
-    echo "Ссылка будет без IP. Вставьте свой IP вручную:"
-    echo "tg://proxy?server=YOUR_IP&port=${PORT}&secret=dd${SECRET}"
-    return 0
+    echo "Вставьте свой IP вручную:"
+    echo "tg://proxy?server=ВАШ_IP&port=${PORT}&secret=dd${SECRET}"
   fi
 
   echo
-  echo "Готово. Данные MTProto:"
-  echo "Server: $ip"
-  echo "Port  : $PORT"
-  echo "Secret: dd$SECRET"
-  [[ -n "${TAG:-}" ]] && echo "Tag   : $TAG"
-  echo
-  echo "Ссылка для Telegram:"
-  echo "tg://proxy?server=${ip}&port=${PORT}&secret=dd${SECRET}"
-  echo
 }
 
-start_proxy() {
+запустить_прокси() {
   ensure_docker
   load_conf
 
@@ -198,22 +206,21 @@ start_proxy() {
     port="$(choose_port)" || return 1
     [[ "$port" == "back" ]] && return 0
 
-    secret="$(rand_hex)"
-    tag=""   # можно задать позже, если нужно
+    secret="$(rand_hex_16bytes)"
+    tag=""
     save_conf "$port" "$secret" "$tag"
     load_conf
   fi
 
-  # если контейнер уже есть — удалим (чтобы пересоздать с параметрами)
+  # если контейнер уже есть — удалим, чтобы пересоздать корректно
   if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 
-  echo "Запускаю MTProto proxy в Docker..."
+  echo "Запускаю MTProto Proxy в Docker..."
   docker pull "$IMAGE" >/dev/null
 
-  # контейнер слушает 443 внутри, наружу мапим выбранный PORT
-  # SECRET передаём без dd, dd нужно только в ссылке для клиента
+  # контейнер слушает 443 внутри, наружу мапим выбранный порт PORT
   if [[ -n "${TAG:-}" ]]; then
     docker run -d \
       --name "$CONTAINER_NAME" \
@@ -233,11 +240,11 @@ start_proxy() {
 
   open_firewall_iptables "$PORT"
 
-  echo "MTProto proxy запущен."
-  print_link
+  echo "MTProto Proxy запущен."
+  показать_ссылку
 }
 
-stop_proxy() {
+остановить_прокси() {
   ensure_docker
   if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
     docker stop "$CONTAINER_NAME" >/dev/null
@@ -247,11 +254,11 @@ stop_proxy() {
   fi
 }
 
-status_proxy() {
+статус() {
   ensure_docker
   load_conf
   echo
-  echo "Статус Docker контейнера:"
+  echo "Статус контейнера:"
   docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
   echo
   if [[ -f "$CONF" ]]; then
@@ -265,77 +272,77 @@ status_proxy() {
   echo
 }
 
-set_tag() {
+изменить_tag() {
   load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (Start/Create)." >&2; return 1; }
+  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
   read -r -p "Введите TAG (пусто чтобы очистить): " newtag
   save_conf "${PORT}" "${SECRET}" "$newtag"
-  echo "TAG обновлён. Чтобы применить — перезапустите (Restart)."
+  echo "TAG обновлён. Чтобы применить — перезапустите (пункт 3)."
 }
 
-regen_secret() {
+пересоздать_секрет() {
   load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (Start/Create)." >&2; return 1; }
-  local newsecret; newsecret="$(rand_hex)"
+  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
+  local newsecret; newsecret="$(rand_hex_16bytes)"
   save_conf "${PORT}" "$newsecret" "${TAG:-}"
-  echo "SECRET обновлён. Чтобы применить — перезапустите (Restart)."
-  print_link
+  echo "Секрет обновлён. Чтобы применить — перезапустите (пункт 3)."
+  показать_ссылку
 }
 
-change_port() {
+изменить_порт() {
   load_conf
-  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (Start/Create)." >&2; return 1; }
+  [[ -f "$CONF" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 1; }
   local newport
   newport="$(choose_port)" || return 1
   [[ "$newport" == "back" ]] && return 0
   save_conf "$newport" "${SECRET}" "${TAG:-}"
-  echo "PORT обновлён. Чтобы применить — перезапустите (Restart)."
+  echo "Порт обновлён. Чтобы применить — перезапустите (пункт 3)."
 }
 
-restart_proxy() {
-  stop_proxy || true
-  start_proxy
+перезапуск() {
+  остановить_прокси || true
+  запустить_прокси
 }
 
-uninstall_proxy() {
+удалить_всё() {
   ensure_docker
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   rm -f "$CONF"
   echo "Удалено: контейнер и конфиг."
 }
 
-main_menu() {
+главное_меню() {
   require_root
   while true; do
     echo
-    echo "========== MTProto Proxy Manager =========="
-    echo "1) Start/Create MTProto proxy"
-    echo "2) Stop"
-    echo "3) Restart"
-    echo "4) Status"
-    echo "5) Show Telegram link"
-    echo "6) Change port (no 80/443)"
-    echo "7) Regenerate secret"
-    echo "8) Set/clear TAG"
-    echo "9) Uninstall (remove container + config)"
-    echo "0) Exit"
-    echo "==========================================="
+    echo "=========== MTProto Proxy (менеджер) ==========="
+    echo "1) Создать/Запустить MTProto Proxy"
+    echo "2) Остановить"
+    echo "3) Перезапустить"
+    echo "4) Статус"
+    echo "5) Показать ссылку для Telegram"
+    echo "6) Изменить порт (80/443 запрещены)"
+    echo "7) Пересоздать секрет"
+    echo "8) Задать/очистить TAG"
+    echo "9) Удалить всё (контейнер + конфиг)"
+    echo "0) Выход"
+    echo "================================================"
     read -r -p "Ваш выбор: " c
 
     case "$c" in
-      1) start_proxy ;;
-      2) stop_proxy ;;
-      3) restart_proxy ;;
-      4) status_proxy ;;
-      5) print_link ;;
-      6) change_port ;;
-      7) regen_secret ;;
-      8) set_tag ;;
-      9) uninstall_proxy ;;
+      1) запустить_прокси ;;
+      2) остановить_прокси ;;
+      3) перезапуск ;;
+      4) статус ;;
+      5) показать_ссылку ;;
+      6) изменить_порт ;;
+      7) пересоздать_секрет ;;
+      8) изменить_tag ;;
+      9) удалить_всё ;;
       0) exit 0 ;;
       *) echo "Неверный выбор." ;;
     esac
   done
 }
 
-main_menu
+главное_меню
