@@ -1,6 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ===== Pretty UI (ASCII) =====
+# Стиль как на скрине: пунктирные линии, розовый заголовок, подсветка пунктов.
+# Работает в "кривых" веб-консолях (без unicode рамок).
+
+# Цвета (ANSI)
+CLR_RESET=$'\033[0m'
+CLR_BOLD=$'\033[1m'
+CLR_DIM=$'\033[2m'
+
+CLR_RED=$'\033[31m'
+CLR_GREEN=$'\033[32m'
+CLR_YELLOW=$'\033[33m'
+CLR_BLUE=$'\033[34m'
+CLR_MAG=$'\033[35m'   # розово-фиолетовый
+CLR_CYAN=$'\033[36m'
+CLR_GRAY=$'\033[90m'
+
+# Если нет TTY — отключаем цвета
+if [[ ! -t 1 ]]; then
+  CLR_RESET=""; CLR_BOLD=""; CLR_DIM=""
+  CLR_RED=""; CLR_GREEN=""; CLR_YELLOW=""; CLR_BLUE=""; CLR_MAG=""; CLR_CYAN=""; CLR_GRAY=""
+fi
+
+ui_cols() { tput cols 2>/dev/null || echo 80; }
+
+ui_repeat() { local ch="$1" n="$2"; printf "%*s" "$n" "" | tr " " "$ch"; }
+
+ui_line_dashed() {
+  # "=-" повторяется по ширине — выглядит как пунктир
+  local w; w="$(ui_cols)"
+  local pattern="=-"
+  local out=""
+  while ((${#out} < w)); do out+="$pattern"; done
+  echo "${out:0:w}"
+}
+
+ui_clear() { command -v clear >/dev/null 2>&1 && clear || printf "\n"; }
+
+ui_center() {
+  local text="$1"
+  local w; w="$(ui_cols)"
+  local len=${#text}
+  if (( len >= w )); then
+    echo "$text"
+  else
+    local pad=$(( (w - len) / 2 ))
+    printf "%*s%s\n" "$pad" "" "$text"
+  fi
+}
+
+ui_header() {
+  local title="$1"
+  ui_clear
+  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+  ui_center "${CLR_BOLD}${CLR_MAG}${title}${CLR_RESET}"
+  echo "${CLR_MAG}$(ui_line_dashed)${CLR_RESET}"
+  echo
+}
+
+ui_item() {
+  # ui_item "1" "Текст" "accent"
+  local key="$1"; shift
+  local text="$1"; shift || true
+  local accent="${1:-mag}"
+
+  local color="$CLR_MAG"
+  [[ "$accent" == "yellow" ]] && color="$CLR_YELLOW"
+  [[ "$accent" == "green"  ]] && color="$CLR_GREEN"
+  [[ "$accent" == "cyan"   ]] && color="$CLR_CYAN"
+  [[ "$accent" == "red"    ]] && color="$CLR_RED"
+
+  printf " %s) %s%s%s\n" \
+    "${CLR_BOLD}${color}${key}${CLR_RESET}" \
+    "${color}" "$text" "${CLR_RESET}"
+}
+
+ui_tip() {
+  echo
+  echo "${CLR_DIM}${CLR_GRAY}$*${CLR_RESET}"
+}
+
+ui_prompt() {
+  local varname="$1"
+  local ans=""
+  printf "\n${CLR_BOLD}${CLR_MAG}Ваш выбор:${CLR_RESET} "
+  read -r ans || ans=""
+  printf -v "$varname" "%s" "$ans"
+}
+
+ui_ok()   { echo "${CLR_GREEN}${CLR_BOLD}[OK]${CLR_RESET} $*"; }
+ui_warn() { echo "${CLR_YELLOW}${CLR_BOLD}[!]${CLR_RESET} $*"; }
+ui_err()  { echo "${CLR_RED}${CLR_BOLD}[X]${CLR_RESET} $*" >&2; }
+
 STATE_FILE="/etc/redirect_manager.rules"
 CHAIN_NAT="REDIR_MGR"
 CHAIN_FWD="REDIR_MGR_FWD"
