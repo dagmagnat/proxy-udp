@@ -7,20 +7,6 @@ CHAIN_FWD="REDIR_MGR_FWD"
 
 DEFAULT_PORTS=(1234 5959 35756 35757 56123 56124 50080 50443 51080 51443 52080 52443)
 
-# Очистка экрана (если clear нет — просто печатаем много пустых строк)
-cls() {
-  if command -v clear >/dev/null 2>&1; then
-    clear
-  else
-    printf "\n%.0s" {1..60}
-  fi
-}
-
-pause() {
-  echo
-  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
-}
-
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Запустите скрипт от root: sudo $0" >&2
@@ -136,21 +122,21 @@ print_rules() {
 # меню в stderr, результат в stdout
 choose_protocol_menu() {
   while true; do
-    cls
-    echo "Выберите протокол:"
-    echo "1) UDP"
-    echo "2) TCP"
-    echo "3) UDP и TCP"
-    echo "0) Назад"
-    echo
-    read -r -p "Ваш выбор: " sel
+    echo "" >&2
+    echo "Выберите протокол:" >&2
+    echo "1) UDP" >&2
+    echo "2) TCP" >&2
+    echo "3) UDP и TCP" >&2
+    echo "0) Назад" >&2
+    echo "" >&2
+    read -r -p "Ваш выбор: " sel >&2
 
     case "$sel" in
       1) echo "udp";  return 0 ;;
       2) echo "tcp";  return 0 ;;
       3) echo "both"; return 0 ;;
       0) echo "back"; return 0 ;;
-      *) echo "Неверный выбор, попробуйте снова."; pause ;;
+      *) echo "Неверный выбор, попробуйте снова." >&2 ;;
     esac
   done
 }
@@ -158,12 +144,11 @@ choose_protocol_menu() {
 add_rule() {
   local WAN_IF="$1"
 
-  cls
+  echo
   read -r -p "IP сервера назначения (куда перенаправлять) или 0 (назад): " target_ip
   [[ "$target_ip" == "0" ]] && return 0
   if ! valid_ip "$target_ip"; then
     echo "Неверный IP."
-    pause
     return 0
   fi
 
@@ -178,10 +163,11 @@ add_rule() {
     both) protos=("udp" "tcp") ;;
   esac
 
-  cls
+  echo
   echo "Порты по умолчанию:"
   echo "${DEFAULT_PORTS[*]}"
   echo
+
   echo "Логика:"
   echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
   echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
@@ -191,11 +177,14 @@ add_rule() {
 
   local selected_ports=""
   if [[ -z "${ports_in// }" ]]; then
+    # Enter -> только дефолт
     selected_ports="${DEFAULT_PORTS[*]}"
   else
+    # Ввели свои -> только свои (без дефолта)
     selected_ports="$ports_in"
   fi
 
+  # очистка/валидация
   local cleaned=""
   for p in $selected_ports; do
     if valid_port "$p"; then
@@ -208,7 +197,6 @@ add_rule() {
 
   if [[ -z "${cleaned// }" ]]; then
     echo "Не осталось валидных портов — отмена."
-    pause
     return 0
   fi
 
@@ -234,26 +222,23 @@ add_rule() {
   else
     echo "Ничего не добавлено (возможно, все правила уже существовали)."
   fi
-
-  pause
 }
 
 delete_rule() {
   local WAN_IF="$1"
 
-  cls
   if [[ ! -s "$STATE_FILE" ]]; then
     echo "Удалять нечего — правил нет."
-    pause
     return 0
   fi
 
+  echo
   print_rules
   echo
   echo "0) Назад"
   read -r -p "Введите номер правила для удаления (можно несколько через пробел): " nums
   [[ "$nums" == "0" ]] && return 0
-  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; pause; return 0; }
+  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; return 0; }
 
   local filtered=""
   for n in $nums; do
@@ -264,7 +249,7 @@ delete_rule() {
     fi
   done
   filtered="${filtered# }"
-  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; pause; return 0; }
+  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; return 0; }
 
   local tmp
   tmp="$(mktemp)"
@@ -282,7 +267,6 @@ delete_rule() {
 
   apply_rules "$WAN_IF"
   echo "Удаление выполнено."
-  pause
 }
 
 main_menu() {
@@ -293,7 +277,6 @@ main_menu() {
   local WAN_IF
   WAN_IF="$(detect_wan_if)"
 
-  cls
   echo "Интерфейс (WAN): $WAN_IF"
   echo "Файл правил: $STATE_FILE"
   echo
@@ -301,24 +284,20 @@ main_menu() {
   apply_rules "$WAN_IF"
 
   while true; do
-    cls
-    echo "Интерфейс (WAN): $WAN_IF"
-    echo "Файл правил: $STATE_FILE"
     echo
     echo "Меню:"
     echo "1) Добавить"
     echo "2) Удалить"
     echo "3) Посмотреть какие есть"
     echo "0) Выход"
-    echo
     read -r -p "Выберите пункт: " c
 
     case "$c" in
       1) add_rule "$WAN_IF" ;;
       2) delete_rule "$WAN_IF" ;;
-      3) cls; print_rules; pause ;;
-      0) cls; exit 0 ;;
-      *) echo "Неверный выбор."; pause ;;
+      3) print_rules ;;
+      0) exit 0 ;;
+      *) echo "Неверный выбор." ;;
     esac
   done
 }
