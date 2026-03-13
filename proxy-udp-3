@@ -1,0 +1,450 @@
+#!/bin/bash
+
+# --- ЦВЕТА ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# --- ФИКСИРОВАННЫЕ ПОРТЫ ANTIZAPRET ---
+ANTIZAPRET_PORTS=(1234 5959 35756 35757 56123 56124 50080 50443 51080 51443 52080 52443)
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}[ERROR] Запустите скрипт с правами root!${NC}"
+        exit 1
+    fi
+}
+
+is_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+read_target_ip() {
+    local prompt_text="${1:-Введите IP адрес назначения:}"
+    while true; do
+        echo -e "$prompt_text"
+        read -r -p "> " TARGET_IP
+        if [[ -n "$TARGET_IP" ]]; then
+            break
+        fi
+        echo -e "${RED}Ошибка: IP не может быть пустым.${NC}"
+    done
+}
+
+read_protocol() {
+    while true; do
+        echo -e "Выберите протокол (${YELLOW}tcp${NC} или ${YELLOW}udp${NC}):"
+        read -r -p "> " PROTO
+        if [[ "$PROTO" == "tcp" || "$PROTO" == "udp" ]]; then
+            break
+        fi
+        echo -e "${RED}Ошибка: введите tcp или udp!${NC}"
+    done
+}
+
+read_ports_list() {
+    local prompt_text="$1"
+    local ports_input
+    local -n result_array=$2
+
+    while true; do
+        echo -e "$prompt_text"
+        read -r -p "> " ports_input
+
+        if [[ -z "$ports_input" ]]; then
+            echo -e "${RED}Ошибка: укажите хотя бы один порт.${NC}"
+            continue
+        fi
+
+        read -r -a result_array <<< "$ports_input"
+
+        local valid=true
+        for p in "${result_array[@]}"; do
+            if ! is_valid_port "$p"; then
+                echo -e "${RED}Ошибка: порт '$p' некорректен.${NC}"
+                valid=false
+                break
+            fi
+        done
+
+        if $valid; then
+            break
+        fi
+    done
+}
+
+get_main_interface() {
+    ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}'
+}
+
+# --- ПОДГОТОВКА СИСТЕМЫ ---
+prepare_system() {
+    # Автоматическое создание глобальной команды gokaskad
+    if [ "$0" != "/usr/local/bin/gokaskad" ]; then
+        cp -f "$0" "/usr/local/bin/gokaskad"
+        chmod +x "/usr/local/bin/gokaskad"
+    fi
+
+    # Включение IP Forwarding
+    if grep -q "^#\?net.ipv4.ip_forward=" /etc/sysctl.conf; then
+        sed -i 's/^#\?net.ipv4.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    else
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+
+    # Активация Google BBR
+    if grep -q "^#\?net.core.default_qdisc=" /etc/sysctl.conf; then
+        sed -i 's/^#\?net.core.default_qdisc=.*/net.core.default_qdisc=fq/' /etc/sysctl.conf
+    else
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+
+    if grep -q "^#\?net.ipv4.tcp_congestion_control=" /etc/sysctl.conf; then
+        sed -i 's/^#\?net.ipv4.tcp_congestion_control=.*/net.ipv4.tcp_congestion_control=bbr/' /etc/sysctl.conf
+    else
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    fi
+
+    sysctl -p > /dev/null
+
+    export DEBIAN_FRONTEND=noninteractive
+    if ! dpkg -s iptables-persistent >/dev/null 2>&1; then
+        apt-get update -y > /dev/null
+        apt-get install -y iptables-persistent netfilter-persistent > /dev/null
+    fi
+}
+
+# --- ИНСТРУКЦИЯ ---
+show_instructions() {
+    clear
+    echo -e "${MAGENTA}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║                    ИНСТРУКЦИЯ ПО НАСТРОЙКЕ                  ║${NC}"
+    echo -e "${MAGENTA}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${CYAN}1. Подготовьте данные удалённого сервера:${NC}"
+    echo -e "   - IP адрес"
+    echo -e "   - нужный порт или список портов"
+    echo ""
+    echo -e "${CYAN}2. Выберите тип правила:${NC}"
+    echo -e "   - стандартное: входящий порт = исходящий порт"
+    echo -e "   - кастомное: входящие и исходящие порты можно задать отдельно"
+    echo -e "   - WireGuard AntiZapret: применяются фиксированные порты"
+    echo ""
+    echo -e "${CYAN}3. После настройки:${NC}"
+    echo -e "   - клиент подключается к IP ЭТОГО сервера"
+    echo -e "   - трафик перенаправляется дальше на указанный сервер назначения"
+    echo ""
+    read -r -p "Нажмите Enter, чтобы вернуться в меню..."
+}
+
+# --- ПРИМЕНЕНИЕ ОДНОГО ПРАВИЛА IPTABLES ---
+apply_single_rule() {
+    local PROTO="$1"
+    local IN_PORT="$2"
+    local OUT_PORT="$3"
+    local TARGET_IP="$4"
+    local NAME="$5"
+    local IFACE="$6"
+
+    # Удаление старых правил с точно таким же совпадением
+    iptables -t nat -D PREROUTING -p "$PROTO" --dport "$IN_PORT" -j DNAT --to-destination "$TARGET_IP:$OUT_PORT" 2>/dev/null
+    iptables -D INPUT -p "$PROTO" --dport "$IN_PORT" -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -p "$PROTO" -d "$TARGET_IP" --dport "$OUT_PORT" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -p "$PROTO" -s "$TARGET_IP" --sport "$OUT_PORT" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+
+    # Добавление новых правил
+    iptables -A INPUT -p "$PROTO" --dport "$IN_PORT" -j ACCEPT
+    iptables -t nat -A PREROUTING -p "$PROTO" --dport "$IN_PORT" -j DNAT --to-destination "$TARGET_IP:$OUT_PORT"
+
+    if ! iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
+    fi
+
+    iptables -A FORWARD -p "$PROTO" -d "$TARGET_IP" --dport "$OUT_PORT" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+    iptables -A FORWARD -p "$PROTO" -s "$TARGET_IP" --sport "$OUT_PORT" -m state --state ESTABLISHED,RELATED -j ACCEPT
+}
+
+save_firewall_rules() {
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
+        sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null
+
+        while IFS="|" read -r proto in_port _; do
+            [[ -z "$proto" || -z "$in_port" ]] && continue
+            ufw allow "$in_port/$proto" >/dev/null 2>&1
+        done <<< "$1"
+
+        ufw reload >/dev/null 2>&1
+    fi
+
+    netfilter-persistent save > /dev/null
+}
+
+# --- ПРИМЕНЕНИЕ НАБОРА ПРАВИЛ ---
+apply_batch_rules() {
+    local PROTO="$1"
+    local TARGET_IP="$2"
+    local NAME="$3"
+    shift 3
+
+    local rules=("$@")
+    local IFACE
+    local saved_ports=""
+    IFACE=$(get_main_interface)
+
+    if [[ -z "$IFACE" ]]; then
+        echo -e "${RED}[ERROR] Не удалось определить сетевой интерфейс!${NC}"
+        exit 1
+    fi
+
+    echo -e "${YELLOW}[*] Применение правил...${NC}"
+
+    local applied_count=0
+    for rule in "${rules[@]}"; do
+        local in_port="${rule%%:*}"
+        local out_port="${rule##*:}"
+
+        apply_single_rule "$PROTO" "$in_port" "$out_port" "$TARGET_IP" "$NAME" "$IFACE"
+        saved_ports+="${PROTO}|${in_port}|${out_port}"$'\n'
+        ((applied_count++))
+    done
+
+    save_firewall_rules "$saved_ports"
+
+    echo -e "${GREEN}[SUCCESS] $NAME настроен!${NC}"
+    echo -e "Протокол: ${WHITE}$PROTO${NC}"
+    echo -e "Сервер назначения: ${WHITE}$TARGET_IP${NC}"
+    echo -e "Применено правил: ${WHITE}$applied_count${NC}"
+    echo ""
+
+    for rule in "${rules[@]}"; do
+        local in_port="${rule%%:*}"
+        local out_port="${rule##*:}"
+        echo -e "  ${CYAN}$in_port${NC} -> ${GREEN}$TARGET_IP:$out_port${NC}"
+    done
+
+    echo ""
+    read -r -p "Нажмите Enter для возврата в меню..."
+}
+
+# --- СТАНДАРТНАЯ НАСТРОЙКА (НЕСКОЛЬКО ПОРТОВ, ВХОД = ВЫХОД) ---
+configure_rule() {
+    local PROTO="$1"
+    local NAME="$2"
+    local PORTS=()
+    local RULES=()
+
+    echo -e "\n${CYAN}--- Настройка $NAME ($PROTO) ---${NC}"
+    read_target_ip "Введите IP адрес назначения:"
+    read_ports_list "Введите один или несколько портов через пробел (входящий = исходящий):" PORTS
+
+    for port in "${PORTS[@]}"; do
+        RULES+=("$port:$port")
+    done
+
+    apply_batch_rules "$PROTO" "$TARGET_IP" "$NAME" "${RULES[@]}"
+}
+
+# --- КАСТОМНАЯ НАСТРОЙКА (НЕСКОЛЬКО ПОРТОВ) ---
+configure_custom_rule() {
+    local IN_PORTS=()
+    local OUT_PORTS=()
+    local RULES=()
+
+    echo -e "\n${CYAN}--- Универсальное кастомное правило ---${NC}"
+    echo -e "${WHITE}Можно указать несколько входящих портов через пробел.${NC}"
+    echo -e "${WHITE}Для исходящих портов можно указать:${NC}"
+    echo -e " - ${YELLOW}один порт${NC} — он применится ко всем входящим"
+    echo -e " - ${YELLOW}несколько портов${NC} — количество должно совпадать с входящими"
+    echo ""
+
+    read_protocol
+    read_target_ip "Введите IP адрес назначения (куда отправляем трафик):"
+    read_ports_list "Введите ВХОДЯЩИЕ порты через пробел:" IN_PORTS
+    read_ports_list "Введите ИСХОДЯЩИЙ порт или несколько портов через пробел:" OUT_PORTS
+
+    if [ "${#OUT_PORTS[@]}" -eq 1 ]; then
+        for in_port in "${IN_PORTS[@]}"; do
+            RULES+=("$in_port:${OUT_PORTS[0]}")
+        done
+    elif [ "${#OUT_PORTS[@]}" -eq "${#IN_PORTS[@]}" ]; then
+        for i in "${!IN_PORTS[@]}"; do
+            RULES+=("${IN_PORTS[$i]}:${OUT_PORTS[$i]}")
+        done
+    else
+        echo -e "${RED}Ошибка: количество исходящих портов должно быть 1 или совпадать с количеством входящих.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    apply_batch_rules "$PROTO" "$TARGET_IP" "Custom Rule" "${RULES[@]}"
+}
+
+# --- WIREGUARD ANTIZAPRET ---
+configure_antizapret_rule() {
+    local RULES=()
+
+    echo -e "\n${CYAN}--- WireGuard AntiZapret ---${NC}"
+    echo -e "${WHITE}Будут автоматически применены следующие порты:${NC}"
+    echo -e "${YELLOW}${ANTIZAPRET_PORTS[*]}${NC}"
+    echo ""
+
+    read_protocol
+    read_target_ip "Введите IP адрес сервера назначения:"
+
+    for port in "${ANTIZAPRET_PORTS[@]}"; do
+        RULES+=("$port:$port")
+    done
+
+    apply_batch_rules "$PROTO" "$TARGET_IP" "WireGuard AntiZapret" "${RULES[@]}"
+}
+
+# --- СПИСОК ПРАВИЛ ---
+list_active_rules() {
+    echo -e "\n${CYAN}--- Активные переадресации ---${NC}"
+    echo -e "${MAGENTA}ПОРТ(ВХОД)\tПРОТОКОЛ\tЦЕЛЬ${NC}"
+
+    local found=false
+    while read -r line; do
+        local l_port
+        local l_proto
+        local l_dest
+
+        l_port=$(echo "$line" | grep -oP '(?<=--dport )\d+')
+        l_proto=$(echo "$line" | grep -oP '(?<=-p )\w+')
+        l_dest=$(echo "$line" | grep -oP '(?<=--to-destination )[\d\.:]+')
+
+        if [[ -n "$l_port" ]]; then
+            found=true
+            echo -e "${l_port}\t\t${l_proto}\t\t${l_dest}"
+        fi
+    done < <(iptables -t nat -S PREROUTING | grep "DNAT")
+
+    if ! $found; then
+        echo -e "${YELLOW}Активных правил нет.${NC}"
+    fi
+
+    echo ""
+    read -r -p "Нажмите Enter..."
+}
+
+# --- УДАЛЕНИЕ ОДНОГО ПРАВИЛА ---
+delete_single_rule() {
+    echo -e "\n${CYAN}--- Удаление правила ---${NC}"
+    declare -a RULES_LIST
+    local i=1
+
+    while read -r line; do
+        local l_port
+        local l_proto
+        local l_dest
+
+        l_port=$(echo "$line" | grep -oP '(?<=--dport )\d+')
+        l_proto=$(echo "$line" | grep -oP '(?<=-p )\w+')
+        l_dest=$(echo "$line" | grep -oP '(?<=--to-destination )[\d\.:]+')
+
+        if [[ -n "$l_port" && -n "$l_proto" && -n "$l_dest" ]]; then
+            RULES_LIST[$i]="$l_port|$l_proto|$l_dest"
+            echo -e "${YELLOW}[$i]${NC} Вход: $l_port ($l_proto) -> Выход: $l_dest"
+            ((i++))
+        fi
+    done < <(iptables -t nat -S PREROUTING | grep "DNAT")
+
+    if [ ${#RULES_LIST[@]} -eq 0 ]; then
+        echo -e "${RED}Нет активных правил.${NC}"
+        read -r -p "Нажмите Enter..."
+        return
+    fi
+
+    echo ""
+    read -r -p "Номер правила для удаления (0 отмена): " rule_num
+    if [[ "$rule_num" == "0" || -z "${RULES_LIST[$rule_num]}" ]]; then
+        return
+    fi
+
+    IFS='|' read -r d_port d_proto d_dest <<< "${RULES_LIST[$rule_num]}"
+    local target_ip="${d_dest%:*}"
+    local target_port="${d_dest##*:}"
+
+    iptables -t nat -D PREROUTING -p "$d_proto" --dport "$d_port" -j DNAT --to-destination "$d_dest" 2>/dev/null
+    iptables -D INPUT -p "$d_proto" --dport "$d_port" -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -p "$d_proto" -d "$target_ip" --dport "$target_port" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -p "$d_proto" -s "$target_ip" --sport "$target_port" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+
+    netfilter-persistent save > /dev/null
+    echo -e "${GREEN}[OK] Правило удалено.${NC}"
+    read -r -p "Нажмите Enter..."
+}
+
+# --- ПОЛНАЯ ОЧИСТКА ---
+flush_rules() {
+    echo -e "\n${RED}!!! ВНИМАНИЕ !!!${NC}"
+    echo "Будут сброшены ВСЕ настройки iptables."
+    read -r -p "Вы уверены? (y/n): " confirm
+
+    if [[ "$confirm" == "y" ]]; then
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -P OUTPUT ACCEPT
+        iptables -t nat -F
+        iptables -t mangle -F
+        iptables -F
+        iptables -X
+        netfilter-persistent save > /dev/null
+        echo -e "${GREEN}[OK] Очищено.${NC}"
+    fi
+
+    read -r -p "Нажмите Enter..."
+}
+
+# --- МЕНЮ ---
+show_menu() {
+    while true; do
+        clear
+        echo -e "${MAGENTA}"
+        echo "******************************************************"
+        echo "              KASKAD / PORT FORWARD MANAGER"
+        echo "******************************************************"
+        echo -e "${NC}"
+
+        echo -e "1) Настроить ${CYAN}AmneziaWG / WireGuard${NC} (UDP)"
+        echo -e "2) Настроить ${CYAN}VLESS / XRay${NC} (TCP)"
+        echo -e "3) Настроить ${CYAN}TProxy / MTProto${NC} (TCP)"
+        echo -e "4) Настроить ${CYAN}WireGuard AntiZapret${NC} (TCP/UDP, фиксированные порты)"
+        echo -e "5) Создать ${YELLOW}кастомное правило${NC} (разные порты, несколько портов)"
+        echo -e "6) Посмотреть активные правила"
+        echo -e "7) ${RED}Удалить одно правило${NC}"
+        echo -e "8) ${RED}Сбросить ВСЕ настройки${NC}"
+        echo -e "9) Показать инструкцию"
+        echo -e "0) Выход"
+        echo -e "------------------------------------------------------"
+
+        read -r -p "Ваш выбор: " choice
+
+        case $choice in
+            1) configure_rule "udp" "AmneziaWG / WireGuard" ;;
+            2) configure_rule "tcp" "VLESS / XRay" ;;
+            3) configure_rule "tcp" "MTProto / TProxy" ;;
+            4) configure_antizapret_rule ;;
+            5) configure_custom_rule ;;
+            6) list_active_rules ;;
+            7) delete_single_rule ;;
+            8) flush_rules ;;
+            9) show_instructions ;;
+            0) exit 0 ;;
+            *) ;;
+        esac
+    done
+}
+
+# --- ЗАПУСК ---
+check_root
+prepare_system
+show_menu
