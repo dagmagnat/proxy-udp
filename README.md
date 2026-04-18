@@ -5,9 +5,6 @@ bash <(wget -qO- --inet4-only https://raw.githubusercontent.com/dagmagnat/proxy-
 bash <(wget -qO- --inet4-only https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp-2)
 ```
 ```bash
-bash <(wget -qO- --inet4-only https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp-3)
-```
-```bash
 bash <(wget -qO- --inet4-only https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager)
 ```
 
