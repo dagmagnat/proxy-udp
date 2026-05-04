@@ -1,175 +1,226 @@
 # Proxy UDP
 
-`Proxy UDP` — интерактивный менеджер TCP/UDP-перенаправлений на базе `iptables` NAT.
-Несмотря на название, скрипт умеет работать не только с UDP, но и с TCP: можно создать перенаправление только UDP, только TCP или сразу TCP+UDP.
+[English](README.md) | [Русский](README.ru_RU.md)
 
-Скрипт подходит для сценариев, когда есть промежуточный сервер-прокси, а трафик нужно перенаправлять на другой сервер, например на VPN-сервер.
+`Proxy UDP` is an interactive TCP/UDP forwarding manager based on Linux `iptables` NAT.
 
-## Возможности
+Despite the name, the script is not limited to UDP. It can create forwarding rules for:
 
-- Создание TCP/UDP-перенаправлений.
-- Отдельный режим `UDP`, `TCP` и `UDP + TCP`.
-- Preset `AntizapretVPN by GubernievS` без портов `80` и `443`.
-- Удаление выбранных правил.
-- Удаление всех правил, которыми управляет скрипт.
-- Просмотр текущих правил.
-- Проверка портов.
-- Очистка экрана при переходах по меню.
-- Цветной интерфейс с мягким зеленым акцентом.
-- Навигация во всех основных пунктах:
-  - `0` — назад;
-  - `00` — главное меню.
-- Настройки высокой нагрузки: `conntrack`, UDP timeouts, backlog, BBR/fq.
-- Выбор NAT-режима:
-  - `SNAT` — лучше для статического внешнего IPv4;
-  - `MASQUERADE` — лучше для динамического внешнего IPv4.
-- Возможность установить команду `proxy-udp` и systemd-сервис для автоприменения правил после перезагрузки.
+- UDP only;
+- TCP only;
+- both TCP and UDP.
 
-## Быстрая установка
+The script is useful when you have an intermediate proxy/forwarding server and need to redirect traffic to another server, for example to a VPN server.
+
+## Quick install
+
+### Proxy UDP
+
+One-command launch:
 
 ```bash
-wget -O /root/proxy-udp https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)")
+```
+
+Manual install:
+
+```bash
+wget -O /root/proxy-udp "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)"
 chmod +x /root/proxy-udp
 sudo /root/proxy-udp
 ```
 
+### MTProto Manager
 
-## Главное меню
+One-command launch:
 
-```text
-1) Создать прокси / перенаправление
-2) AntizapretVPN by GubernievS — preset портов без 80/443
-3) Удалить выбранные правила
-4) Удалить все правила
-5) Посмотреть правила
-6) Проверка портов
-7) Настройки и диагностика высокой нагрузки
-8) Установить команду proxy-udp и автоприменение после перезагрузки
-0) Выход
+```bash
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)")
 ```
 
-## Preset AntizapretVPN by GubernievS
+Manual install:
 
-В preset добавлены порты:
+```bash
+wget -O /root/mtproto-manager "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)"
+chmod +x /root/mtproto-manager
+sudo /root/mtproto-manager
+```
+
+The `?$(date +%s)` suffix is used to bypass a possible GitHub Raw cache immediately after updating a file.
+
+## Features
+
+- Create TCP/UDP forwarding rules.
+- Separate modes for `UDP`, `TCP`, and `UDP + TCP`.
+- `AntizapretVPN by GubernievS` preset without ports `80` and `443`.
+- Remove selected rules.
+- Remove all rules managed by the script.
+- View current rules.
+- Port availability checks.
+- Screen clearing when switching menu sections.
+- Colored terminal interface with a soft green accent.
+- Navigation in the main sections:
+  - `0` — go back;
+  - `00` — return to the main menu.
+- High-load tuning: `conntrack`, UDP timeouts, backlog, BBR/fq.
+- NAT mode selection:
+  - `SNAT` — better for a static external IPv4 address;
+  - `MASQUERADE` — better for a dynamic external IPv4 address.
+- Optional installation of the `proxy-udp` command and a systemd service for automatic rule re-application after reboot.
+
+## Main menu
+
+```text
+1) Create proxy / forwarding rule
+2) AntizapretVPN by GubernievS — port preset without 80/443
+3) Delete selected rules
+4) Delete all rules
+5) Show rules
+6) Port check
+7) High-load tuning and diagnostics
+8) Install proxy-udp command and auto-apply rules after reboot
+0) Exit
+```
+
+## AntizapretVPN by GubernievS preset
+
+The preset includes these ports:
 
 ```text
 504 508 540 580 50080 50443 51080 51443 52080 52443
 ```
 
-Порты `80` и `443` намеренно не добавляются в preset по умолчанию.
+Ports `80` and `443` are intentionally not included in the default preset.
 
-Доступны режимы:
+Available modes:
 
-1. Рекомендуемый режим:
-   - OpenVPN: `504`, `508`, `50080`, `50443` через TCP и UDP;
-   - WireGuard / AmneziaWG: `540`, `580`, `51080`, `51443`, `52080`, `52443` через UDP.
-2. Все preset-порты TCP+UDP.
-3. Все preset-порты только UDP.
-4. Все preset-порты только TCP.
+1. Recommended mode:
+   - OpenVPN: `504`, `508`, `50080`, `50443` over TCP and UDP;
+   - WireGuard / AmneziaWG: `540`, `580`, `51080`, `51443`, `52080`, `52443` over UDP.
+2. All preset ports over TCP+UDP.
+3. All preset ports over UDP only.
+4. All preset ports over TCP only.
 
-## Как это работает
+## How Proxy UDP works
 
-Скрипт создает собственные цепочки:
+The script creates its own chains:
 
-- `PROXY_UDP_NAT` в таблице `nat` для DNAT;
-- `PROXY_UDP_POST` в таблице `nat` для SNAT/MASQUERADE;
-- `PROXY_UDP_FWD` в таблице `filter` для FORWARD-разрешений.
+- `PROXY_UDP_NAT` in the `nat` table for DNAT;
+- `PROXY_UDP_POST` in the `nat` table for SNAT/MASQUERADE;
+- `PROXY_UDP_FWD` in the `filter` table for FORWARD allow rules.
 
-Правила хранятся в файле:
+Rules are stored in:
 
 ```text
 /etc/proxy-udp.rules
 ```
 
-Формат строки:
+Rule format:
 
 ```text
 proto source_port target_ip target_port
 ```
 
-Пример:
+Example:
 
 ```text
 udp 50080 203.0.113.10 50080
 tcp 50443 203.0.113.10 50443
 ```
 
-## Высокая нагрузка и зависания на UDP
+## High load and UDP freezes
 
-Если при большой скорости UDP начинает подвисать, чаще всего проблема не в bash-меню, а в Linux NAT/conntrack.
+If UDP starts freezing or lagging at high traffic rates, the problem is usually not the Bash menu itself. In most cases, the bottleneck is Linux NAT/conntrack.
 
-В меню `7) Настройки и диагностика высокой нагрузки` есть:
+The menu section `7) High-load tuning and diagnostics` includes:
 
-- применение системного тюнинга;
-- просмотр `nf_conntrack_count` и `nf_conntrack_max`;
-- выбор `SNAT` или `MASQUERADE`.
+- system tuning;
+- viewing `nf_conntrack_count` and `nf_conntrack_max`;
+- choosing `SNAT` or `MASQUERADE`.
 
-Для статического IP обычно лучше использовать `SNAT`. Для динамического IP удобнее `MASQUERADE`.
+For a static IP address, `SNAT` is usually the better choice. For a dynamic IP address, `MASQUERADE` is usually more convenient.
 
-## Проверка портов
+## Port checking
 
-Меню `6) Проверка портов` умеет проверять:
+The menu section `6) Port check` can check:
 
-- текущие правила;
-- вручную указанный IP и список портов.
+- existing rules;
+- a manually entered IP address and a list of ports.
 
-Важно: TCP можно проверить достаточно надежно, а UDP без ответа приложения нельзя проверить на 100% корректно. Если UDP-сервис не отвечает на probe, это не всегда значит, что порт закрыт.
+Important: TCP can be checked fairly reliably. UDP cannot be checked with 100% accuracy without an application-level response. If a UDP service does not reply to a probe, it does not always mean the port is closed.
 
-Для UDP-проверки желательно установить `netcat`:
+For UDP checks, installing `netcat` is recommended:
 
 ```bash
 apt-get update
 apt-get install -y netcat-openbsd
 ```
 
-## Автоприменение после перезагрузки
+## MTProto Manager
 
-В главном меню выберите:
+The repository also includes `mtproto-manager`, an interactive manager for launching MTProto Proxy in Docker.
+
+Main features:
+
+- create and start MTProto Proxy;
+- stop and restart the container;
+- show proxy status;
+- show the Telegram connection link;
+- change the external port;
+- regenerate the proxy secret;
+- show Docker logs;
+- update the Docker image;
+- remove the container and configuration.
+
+## Auto-apply Proxy UDP rules after reboot
+
+In the main menu, select:
 
 ```text
-8) Установить команду proxy-udp и автоприменение после перезагрузки
+8) Install proxy-udp command and auto-apply rules after reboot
 ```
 
-После этого будет создана команда:
+This creates the command:
 
 ```bash
 proxy-udp
 ```
 
-И systemd-сервис:
+And the systemd service:
 
 ```bash
 systemctl status proxy-udp.service
 ```
 
-Применить правила вручную:
+Apply rules manually:
 
 ```bash
 sudo proxy-udp apply
 ```
 
-Посмотреть статус:
+Show status:
 
 ```bash
 sudo proxy-udp status
 ```
 
-Применить сетевой тюнинг:
+Apply network tuning:
 
 ```bash
 sudo proxy-udp tune
 ```
 
-## Требования
+## Requirements
 
-- Debian/Ubuntu или другой Linux с `iptables`.
-- root-доступ.
+- Debian/Ubuntu or another Linux distribution with `iptables`.
+- Root access.
 - IPv4 forwarding.
-- Для расширенной диагностики: `conntrack-tools`.
-- Для UDP-проверок: `netcat-openbsd`.
+- For extended diagnostics: `conntrack-tools`.
+- For UDP checks: `netcat-openbsd`.
+- For MTProto Manager: Docker. If Docker is missing, the manager will try to install it on Debian/Ubuntu.
 
-## Важно
+## Important notes
 
-Скрипт не удаляет все iptables-правила сервера. Он управляет только своими цепочками `PROXY_UDP_*` и не трогает чужие правила напрямую.
+The script does not flush all server firewall rules. It manages only its own `PROXY_UDP_*` chains and does not directly modify unrelated rules.
 
-Перед использованием на боевом сервере рекомендуется иметь доступ к rescue-консоли/VNC от хостинга, чтобы не потерять доступ при ошибке в firewall-настройках.
+Before using the script on a production server, it is recommended to have rescue console/VNC access from your hosting provider, so you do not lose access if a firewall configuration mistake is made.
