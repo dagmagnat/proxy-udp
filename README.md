@@ -50,20 +50,7 @@ sudo /root/mtproto-manager
 
 The `?$(date +%s)` suffix helps bypass possible GitHub Raw cache immediately after updating files in the repository.
 
----
 
-## What is included in this repository?
-
-```text
-proxy-udp          # TCP/UDP forwarding manager
-mtproto-manager    # MTProto Proxy Docker manager
-README.md          # English documentation
-README.ru_RU.md    # Russian documentation
-```
-
-You do not need a separate repository for MTProto Manager. Both scripts can stay in the same repository and be installed using separate commands.
-
----
 
 ## Proxy UDP features
 
