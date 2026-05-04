@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+APP_NAME="MTProto Proxy Manager"
 CONF="/etc/mtproto_manager.conf"
 CONTAINER_NAME="mtproto-proxy"
 IMAGE="telegrammessenger/proxy:latest"
+VOLUME_NAME="mtproto-proxy-data"
+DEFAULT_PORT="443"
+DEFAULT_WORKERS="2"
 
-require_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    echo "Запустите от root: sudo $0" >&2
-    exit 1
-  fi
-}
+SOFT_GREEN='\033[38;5;114m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+MSG_BACK="__BACK__"
+MSG_MAIN="__MAIN__"
+
+CONF_PORT=""
+CONF_SECRET=""
+CONF_WORKERS=""
+CONF_TAG=""
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
-
-cls() {
-  if cmd_exists clear; then
-    clear
-  else
-    printf "\n%.0s" {1..60}
-  fi
-}
-
-pause() {
-  echo
-  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
-}
 
 trim() {
   local s="${1//$'\r'/}"
@@ -33,14 +33,63 @@ trim() {
   printf "%s" "$s"
 }
 
-# любой порт 1-65535
+cls() {
+  if cmd_exists clear; then clear; else printf '\n%.0s' {1..60}; fi
+}
+
+ok() { echo -e "${SOFT_GREEN}$*${RESET}"; }
+warn() { echo -e "${YELLOW}$*${RESET}"; }
+err() { echo -e "${RED}$*${RESET}" >&2; }
+info() { echo -e "${CYAN}$*${RESET}"; }
+
+pause() { echo; read -r -p "Нажмите Enter чтобы продолжить... " _ || true; }
+
+header() {
+  cls
+  echo -e "${SOFT_GREEN}${BOLD}========== ${APP_NAME} ==========${RESET}"
+  echo -e "${DIM}0 — назад, 00 — главное меню${RESET}"
+  echo
+}
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    err "Запустите от root: sudo $0"
+    exit 1
+  fi
+}
+
+read_nav() {
+  local prompt="$1" value
+  read -r -p "$prompt" value || return 1
+  value="$(trim "$value")"
+  case "$value" in
+    0) echo "$MSG_BACK" ;;
+    00) echo "$MSG_MAIN" ;;
+    *) echo "$value" ;;
+  esac
+}
+
+is_nav_back() { [[ "${1:-}" == "$MSG_BACK" ]]; }
+is_nav_main() { [[ "${1:-}" == "$MSG_MAIN" ]]; }
+
 valid_port() {
   local p
   p="$(trim "${1:-}")"
-  [[ -n "$p" ]] || return 1
-  [[ "$p" =~ ^[0-9]+$ ]] || return 1
-  (( p >= 1 && p <= 65535 )) || return 1
-  return 0
+  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 1
+  ((p >= 1 && p <= 65535)) || return 1
+}
+
+valid_secret() {
+  local s
+  s="$(trim "${1:-}")"
+  [[ "$s" =~ ^[0-9a-fA-F]{32}$ ]]
+}
+
+valid_workers() {
+  local w
+  w="$(trim "${1:-}")"
+  [[ "$w" =~ ^[0-9]+$ ]] || return 1
+  ((w >= 1 && w <= 64)) || return 1
 }
 
 port_free() {
@@ -54,19 +103,6 @@ port_free() {
   fi
 }
 
-pick_random_port() {
-  local tries=0 p
-  while true; do
-    p=$((20000 + (RANDOM % 45000)))  # 20000-64999
-    tries=$((tries + 1))
-    if valid_port "$p" && port_free "$p"; then
-      echo "$p"
-      return 0
-    fi
-    (( tries >= 600 )) && { echo ""; return 1; }
-  done
-}
-
 rand_hex_16bytes() {
   if cmd_exists openssl; then
     openssl rand -hex 16
@@ -75,75 +111,70 @@ rand_hex_16bytes() {
   fi
 }
 
-ensure_docker() {
-  if cmd_exists docker; then
-    return 0
-  fi
+pick_random_port() {
+  local tries=0 p
+  while true; do
+    p=$((20000 + (RANDOM % 45000)))
+    tries=$((tries + 1))
+    if valid_port "$p" && port_free "$p"; then echo "$p"; return 0; fi
+    ((tries >= 600)) && return 1
+  done
+}
 
-  echo "Docker не найден. Пытаюсь установить (Debian/Ubuntu)..."
+ensure_docker() {
+  if cmd_exists docker; then return 0; fi
+  warn "Docker не найден. Пытаюсь установить docker.io через apt..."
   if cmd_exists apt-get; then
     apt-get update -y
     apt-get install -y docker.io
     systemctl enable --now docker
   else
-    echo "Автоустановка Docker доступна только на Debian/Ubuntu (apt)." >&2
+    err "Автоустановка Docker доступна только на Debian/Ubuntu с apt."
     exit 1
   fi
-
-  cmd_exists docker || { echo "Docker не установился." >&2; exit 1; }
+  cmd_exists docker || { err "Docker не установился."; exit 1; }
 }
 
-# --- безопасный конфиг без source ---
-CONF_PORT=""
-CONF_KEY=""
-
-conf_reset() { CONF_PORT=""; CONF_KEY=""; }
+conf_reset() {
+  CONF_PORT=""
+  CONF_SECRET=""
+  CONF_WORKERS=""
+  CONF_TAG=""
+}
 
 conf_load() {
   conf_reset
   [[ -f "$CONF" ]] || return 0
-
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%$'\r'}"
-    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-    [[ "$line" == *=* ]] || continue
-
+    line="$(trim "$line")"
+    [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *=* ]] && continue
     local key="${line%%=*}"
     local val="${line#*=}"
     key="$(trim "$key")"
     val="$(trim "$val")"
-
     case "$key" in
       PORT) CONF_PORT="$val" ;;
-      KEY)  CONF_KEY="$val" ;;
-      SECRET) CONF_KEY="$val" ;; # совместимость со старым конфигом
+      SECRET|KEY) CONF_SECRET="$val" ;;
+      WORKERS) CONF_WORKERS="$val" ;;
+      TAG) CONF_TAG="$val" ;;
     esac
   done < "$CONF"
-
-  if [[ -n "$CONF_PORT" ]] && ! valid_port "$CONF_PORT"; then
-    CONF_PORT=""
-  fi
-  if [[ -n "$CONF_KEY" ]] && [[ ! "$CONF_KEY" =~ ^[0-9a-fA-F]{32}$ ]]; then
-    CONF_KEY=""
-  fi
+  valid_port "$CONF_PORT" || CONF_PORT=""
+  valid_secret "$CONF_SECRET" || CONF_SECRET=""
+  valid_workers "$CONF_WORKERS" || CONF_WORKERS=""
+  [[ "$CONF_TAG" =~ ^[0-9a-fA-F]{32}$ ]] || CONF_TAG=""
 }
 
 conf_save() {
-  local port="$1" key="$2"
-  cat > "$CONF" <<EOF
+  local port="$1" secret="$2" workers="${3:-$DEFAULT_WORKERS}" tag="${4:-}"
+  cat > "$CONF" <<EOF_CONF
 # MTProto Proxy Manager config
 PORT=$port
-KEY=$key
-EOF
+SECRET=$secret
+WORKERS=$workers
+TAG=$tag
+EOF_CONF
   chmod 600 "$CONF"
-}
-
-open_firewall_iptables() {
-  local port="$1"
-  if cmd_exists iptables; then
-    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
-      iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
-  fi
 }
 
 get_public_ip() {
@@ -158,228 +189,314 @@ get_public_ip() {
   echo "$ip"
 }
 
-banner_random_due_busy() {
-  local preferred="$1"
-  local chosen="$2"
-  echo
-  echo "############################################################"
-  echo "######################  ПОРТ ЗАНЯТ!  #######################"
-  echo "############################################################"
-  echo "Порт $preferred занят на сервере."
-  echo "Поэтому будет установлен СЛУЧАЙНЫЙ свободный порт: $chosen"
-  echo "Вы всегда можете сменить порт: 6) Изменить порт"
-  echo
+open_firewall_iptables() {
+  local port="$1"
+  if cmd_exists iptables; then
+    iptables -w -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+      iptables -w -I INPUT -p tcp --dport "$port" -j ACCEPT
+  fi
 }
 
-показать_ссылку() {
-  conf_load
-  if [[ -z "$CONF_PORT" || -z "$CONF_KEY" ]]; then
-    echo "Прокси не настроен. Сначала пункт 1." >&2
-    return 1
+remove_firewall_iptables() {
+  local port="$1"
+  if cmd_exists iptables; then
+    while iptables -w -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; do :; done
   fi
+}
 
+container_exists() { docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; }
+container_running() { docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; }
+
+show_link() {
+  conf_load
+  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then
+    warn "Прокси не настроен. Сначала создайте/запустите прокси."
+    return 0
+  fi
   local ip
   ip="$(get_public_ip)"
-
   echo
   echo "Данные MTProto Proxy:"
-  echo "Порт : $CONF_PORT"
-  echo "Ключ : dd$CONF_KEY"
+  echo "Порт   : $CONF_PORT"
+  echo "Secret : $CONF_SECRET"
+  echo "Workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}"
+  [[ -n "$CONF_TAG" ]] && echo "Tag    : $CONF_TAG"
   echo
-
   if [[ -n "$ip" ]]; then
     echo "IP сервера: $ip"
-    echo "Ссылка для Telegram:"
-    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=dd${CONF_KEY}"
+    echo "Telegram link:"
+    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=${CONF_SECRET}"
+    echo
+    echo "t.me link:"
+    echo "https://t.me/proxy?server=${ip}&port=${CONF_PORT}&secret=${CONF_SECRET}"
   else
-    echo "Не удалось определить публичный IP автоматически."
-    echo "Вставьте IP вручную:"
-    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=dd${CONF_KEY}"
+    warn "Не удалось определить публичный IP. Вставьте IP вручную:"
+    echo "tg://proxy?server=ВАШ_IP&port=${CONF_PORT}&secret=${CONF_SECRET}"
   fi
-  echo
 }
 
-создать_или_запустить() {
+ensure_config_interactive() {
+  conf_load
+  local port="${CONF_PORT:-}" secret="${CONF_SECRET:-}" workers="${CONF_WORKERS:-}" tag="${CONF_TAG:-}"
+  local value random_port
+
+  if [[ -z "$secret" ]]; then secret="$(rand_hex_16bytes)"; fi
+  if [[ -z "$workers" ]]; then workers="$DEFAULT_WORKERS"; fi
+
+  while [[ -z "$port" ]]; do
+    value="$(read_nav "Порт [Enter = $DEFAULT_PORT]: ")"
+    is_nav_back "$value" && return 1
+    is_nav_main "$value" && return 10
+    [[ -z "$value" ]] && value="$DEFAULT_PORT"
+    if ! valid_port "$value"; then warn "Неверный порт."; continue; fi
+    if ! port_free "$value"; then
+      random_port="$(pick_random_port || true)"
+      warn "Порт $value занят. Свободный случайный порт: ${random_port:-не найден}"
+      [[ -n "$random_port" ]] && value="$random_port" || continue
+    fi
+    port="$value"
+  done
+
+  while true; do
+    value="$(read_nav "Workers [Enter = $workers]: ")"
+    is_nav_back "$value" && return 1
+    is_nav_main "$value" && return 10
+    [[ -z "$value" ]] && value="$workers"
+    valid_workers "$value" && { workers="$value"; break; }
+    warn "Workers должен быть числом 1-64."
+  done
+
+  conf_save "$port" "$secret" "$workers" "$tag"
+}
+
+start_proxy() {
   ensure_docker
+  header
+  ensure_config_interactive || return $?
   conf_load
 
-  local port="${CONF_PORT:-}"
-  local key="${CONF_KEY:-}"
-
-  # ключ
-  if [[ -z "$key" ]]; then
-    key="$(rand_hex_16bytes)"
-  fi
-
-  # если порта нет в конфиге — по умолчанию хотим 443
-  # если 443 занят — ставим случайный свободный, сообщаем, сохраняем и продолжаем
-  if [[ -z "$port" ]]; then
-    local preferred="443"
-    if port_free "$preferred"; then
-      port="$preferred"
-    else
-      port="$(pick_random_port)" || { echo "Не удалось подобрать свободный порт." >&2; return 0; }
-      banner_random_due_busy "$preferred" "$port"
-    fi
-    conf_save "$port" "$key"
-  fi
-
-  # нормализуем порт и проверяем
-  port="$(trim "$port")"
-  if ! valid_port "$port"; then
-    echo "Ошибка: порт некорректен: '$port'" >&2
-    echo "Выберите: 6) Изменить порт" >&2
-    return 0
-  fi
-
-  # если порт из конфига занят — не падаем, а предлагаем сменить порт
-  if ! port_free "$port"; then
-    echo
-    echo "############################################################"
-    echo "######################  ПОРТ ЗАНЯТ!  #######################"
-    echo "############################################################"
-    echo "Порт $port занят на сервере."
-    echo "Смените порт: 6) Изменить порт"
-    echo
-    return 0
-  fi
-
-  # удалить контейнер если был
-  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+  if container_exists; then
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 
-  echo "Запускаю MTProto Proxy в Docker..."
+  info "Скачиваю образ $IMAGE..."
   docker pull "$IMAGE" >/dev/null || true
 
-  docker run -d \
-    --name "$CONTAINER_NAME" \
-    --restart unless-stopped \
-    -p "${port}:443" \
-    -e "SECRET=${key}" \
-    "$IMAGE" >/dev/null
-
-  open_firewall_iptables "$port"
-  echo "MTProto Proxy запущен."
-  показать_ссылку
-}
-
-остановить() {
-  ensure_docker
-  if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    docker stop "$CONTAINER_NAME" >/dev/null
-    echo "Остановлено."
-  else
-    echo "Контейнер не запущен."
+  local docker_args=(
+    run -d
+    --name "$CONTAINER_NAME"
+    --restart unless-stopped
+    -p "${CONF_PORT}:443"
+    -v "${VOLUME_NAME}:/data"
+    -e "SECRET=${CONF_SECRET}"
+    -e "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}"
+  )
+  if [[ -n "$CONF_TAG" ]]; then
+    docker_args+=(-e "TAG=${CONF_TAG}")
   fi
+  docker_args+=("$IMAGE")
+
+  docker "${docker_args[@]}" >/dev/null
+  open_firewall_iptables "$CONF_PORT"
+  ok "MTProto Proxy запущен."
+  show_link
+  pause
 }
 
-перезапуск() {
-  остановить || true
-  создать_или_запустить
-}
-
-статус() {
+stop_proxy() {
   ensure_docker
+  header
+  if container_running; then
+    docker stop "$CONTAINER_NAME" >/dev/null
+    ok "Контейнер остановлен."
+  else
+    warn "Контейнер не запущен."
+  fi
+  pause
+}
+
+restart_proxy() {
+  ensure_docker
+  header
+  if container_exists; then docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; fi
   conf_load
-  echo
+  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then
+    warn "Конфиг не найден. Создайте прокси заново."
+    pause
+    return 0
+  fi
+  docker pull "$IMAGE" >/dev/null || true
+  local docker_args=(
+    run -d
+    --name "$CONTAINER_NAME"
+    --restart unless-stopped
+    -p "${CONF_PORT}:443"
+    -v "${VOLUME_NAME}:/data"
+    -e "SECRET=${CONF_SECRET}"
+    -e "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}"
+  )
+  [[ -n "$CONF_TAG" ]] && docker_args+=(-e "TAG=${CONF_TAG}")
+  docker_args+=("$IMAGE")
+  docker "${docker_args[@]}" >/dev/null
+  open_firewall_iptables "$CONF_PORT"
+  ok "Перезапущено."
+  show_link
+  pause
+}
+
+status_proxy() {
+  ensure_docker
+  header
+  conf_load
+  echo "Docker container:"
   docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
   echo
-  if [[ -f "$CONF" ]]; then
-    echo "Конфиг: $CONF"
-    echo "PORT=${CONF_PORT}"
-    echo "KEY=dd${CONF_KEY}"
-  else
-    echo "Конфиг не найден: $CONF"
-  fi
+  echo "Config: $CONF"
+  echo "PORT=${CONF_PORT:-не задан}"
+  echo "SECRET=${CONF_SECRET:-не задан}"
+  echo "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}"
+  [[ -n "$CONF_TAG" ]] && echo "TAG=$CONF_TAG"
   echo
+  if container_running; then
+    info "Stats endpoint внутри контейнера:"
+    docker exec "$CONTAINER_NAME" sh -c 'curl -fsS http://localhost:2398/stats 2>/dev/null | head -n 20 || true' || true
+  fi
+  pause
 }
 
-изменить_порт() {
-  conf_load
-  [[ -f "$CONF" && -n "$CONF_KEY" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 0; }
-
+change_port() {
   local newport
+  conf_load
+  header
+  if [[ -z "$CONF_SECRET" ]]; then warn "Сначала создайте прокси."; pause; return 0; fi
   while true; do
-    echo
     echo "Текущий порт: ${CONF_PORT:-не задан}"
-    read -r -p "Введите новый порт (1-65535): " newport
-    newport="$(trim "$newport")"
-
-    if ! valid_port "$newport"; then
-      echo "Неверный порт: '$newport'"
-      continue
-    fi
-
-    if ! port_free "$newport"; then
-      echo
-      echo "############################################################"
-      echo "######################  ПОРТ ЗАНЯТ!  #######################"
-      echo "############################################################"
-      echo "Порт $newport занят. Выберите другой."
-      continue
-    fi
-
+    newport="$(read_nav "Новый порт: ")"
+    is_nav_back "$newport" && return 0
+    is_nav_main "$newport" && return 10
+    valid_port "$newport" || { warn "Неверный порт."; continue; }
+    port_free "$newport" || { warn "Порт занят."; continue; }
     break
   done
-
-  conf_save "$newport" "$CONF_KEY"
-  echo
-  echo "Порт сохранён: $newport"
-  echo "Чтобы применить — сделайте перезапуск (пункт 3)."
-  показать_ссылку
+  [[ -n "$CONF_PORT" ]] && remove_firewall_iptables "$CONF_PORT"
+  conf_save "$newport" "$CONF_SECRET" "${CONF_WORKERS:-$DEFAULT_WORKERS}" "$CONF_TAG"
+  ok "Порт сохранён. Выполняю перезапуск..."
+  restart_proxy
 }
 
-пересоздать_ключ() {
+regenerate_secret() {
   conf_load
-  [[ -f "$CONF" && -n "$CONF_PORT" ]] || { echo "Сначала создайте прокси (пункт 1)." >&2; return 0; }
-  local newkey; newkey="$(rand_hex_16bytes)"
-  conf_save "$CONF_PORT" "$newkey"
-  echo "Ключ обновлён. Чтобы применить — перезапустите (пункт 3)."
-  показать_ссылку
+  header
+  if [[ -z "$CONF_PORT" ]]; then warn "Сначала создайте прокси."; pause; return 0; fi
+  local newsecret
+  newsecret="$(rand_hex_16bytes)"
+  conf_save "$CONF_PORT" "$newsecret" "${CONF_WORKERS:-$DEFAULT_WORKERS}" "$CONF_TAG"
+  ok "Secret обновлён. Выполняю перезапуск..."
+  restart_proxy
 }
 
-удалить_всё() {
+change_workers() {
+  local value
+  conf_load
+  header
+  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then warn "Сначала создайте прокси."; pause; return 0; fi
+  while true; do
+    echo "Текущее значение workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}"
+    value="$(read_nav "Новое значение workers 1-64: ")"
+    is_nav_back "$value" && return 0
+    is_nav_main "$value" && return 10
+    valid_workers "$value" && break
+    warn "Неверное значение."
+  done
+  conf_save "$CONF_PORT" "$CONF_SECRET" "$value" "$CONF_TAG"
+  ok "Workers сохранён. Выполняю перезапуск..."
+  restart_proxy
+}
+
+logs_proxy() {
   ensure_docker
-  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  rm -f "$CONF"
-  echo "Удалено: контейнер и конфиг."
+  header
+  if container_exists; then docker logs --tail=120 "$CONTAINER_NAME" || true; else warn "Контейнер не найден."; fi
+  pause
 }
 
-главное_меню() {
+update_image() {
+  ensure_docker
+  header
+  docker pull "$IMAGE"
+  ok "Образ обновлён. Для применения выполните перезапуск."
+  pause
+}
+
+uninstall_all() {
+  ensure_docker
+  local ans
+  header
+  warn "Будут удалены контейнер, конфиг и Docker volume $VOLUME_NAME."
+  ans="$(read_nav "Введите YES для подтверждения: ")"
+  is_nav_back "$ans" && return 0
+  is_nav_main "$ans" && return 10
+  if [[ "$ans" == "YES" ]]; then
+    conf_load
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+    [[ -n "$CONF_PORT" ]] && remove_firewall_iptables "$CONF_PORT"
+    rm -f "$CONF"
+    ok "Удалено."
+  else
+    warn "Отменено."
+  fi
+  pause
+}
+
+main_menu() {
+  local c rc
   require_root
   while true; do
-    echo
-    echo "=========== MTProto Proxy (менеджер) ==========="
-    echo "1) Создать/Запустить MTProto Proxy (по умолчанию порт 443)"
+    header
+    conf_load
+    echo "1) Создать/запустить MTProto Proxy"
     echo "2) Остановить"
     echo "3) Перезапустить"
-    echo "4) Статус"
+    echo "4) Статус и статистика"
     echo "5) Показать ссылку для Telegram"
     echo "6) Изменить порт"
-    echo "7) Пересоздать ключ"
-    echo "8) Удалить всё (контейнер + конфиг)"
+    echo "7) Пересоздать secret"
+    echo "8) Изменить workers"
+    echo "9) Логи"
+    echo "10) Обновить Docker-образ"
+    echo "11) Удалить всё"
     echo "0) Выход"
-    echo "================================================"
+    echo
+    echo -e "${DIM}Порт: ${CONF_PORT:-не задан}, workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}${RESET}"
+    echo
     read -r -p "Ваш выбор: " c
     c="$(trim "$c")"
-
-    cls
-
+    rc=0
     case "$c" in
-      1) создать_или_запустить ; pause ;;
-      2) остановить           ; pause ;;
-      3) перезапуск           ; pause ;;
-      4) статус               ; pause ;;
-      5) показать_ссылку      ; pause ;;
-      6) изменить_порт        ; pause ;;
-      7) пересоздать_ключ     ; pause ;;
-      8) удалить_всё          ; pause ;;
+      1) start_proxy || rc=$? ;;
+      2) stop_proxy || rc=$? ;;
+      3) restart_proxy || rc=$? ;;
+      4) status_proxy || rc=$? ;;
+      5) header; show_link; pause ;;
+      6) change_port || rc=$? ;;
+      7) regenerate_secret || rc=$? ;;
+      8) change_workers || rc=$? ;;
+      9) logs_proxy || rc=$? ;;
+      10) update_image || rc=$? ;;
+      11) uninstall_all || rc=$? ;;
       0) exit 0 ;;
-      *) echo "Неверный выбор." ; pause ;;
+      *) warn "Неверный выбор."; pause ;;
     esac
+    [[ "$rc" -eq 10 ]] && continue
   done
 }
 
-cls
-главное_меню
+case "${1:-}" in
+  start) require_root; start_proxy ;;
+  restart) require_root; restart_proxy ;;
+  stop) require_root; stop_proxy ;;
+  status) require_root; status_proxy ;;
+  logs) require_root; logs_proxy ;;
+  *) main_menu ;;
+esac
