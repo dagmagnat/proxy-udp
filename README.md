@@ -33,12 +33,6 @@ chmod +x /root/proxy-udp
 sudo /root/proxy-udp
 ```
 
-Если файл называется иначе, например `proxy-udp-enhanced.sh`:
-
-```bash
-chmod +x proxy-udp-enhanced.sh
-sudo ./proxy-udp-enhanced.sh
-```
 
 ## Главное меню
 
