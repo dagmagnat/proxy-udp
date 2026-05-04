@@ -39,20 +39,21 @@ trim() {
 }
 
 cls() {
-  if cmd_exists clear; then
-    clear
-  else
-    printf '\n%.0s' {1..60}
-  fi
+  # Clear screen + scrollback without relying on TERM/clear.
+  printf '\033[H\033[2J\033[3J'
 }
 
 pause() {
-  echo
-  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+  echo >&2
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    read -r -p "Нажмите Enter чтобы продолжить... " _ < /dev/tty || true
+  else
+    read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+  fi
 }
 
 ok() { echo -e "${SOFT_GREEN}$*${RESET}"; }
-warn() { echo -e "${YELLOW}$*${RESET}"; }
+warn() { echo -e "${YELLOW}$*${RESET}" >&2; }
 err() { echo -e "${RED}$*${RESET}" >&2; }
 info() { echo -e "${CYAN}$*${RESET}"; }
 
@@ -178,7 +179,12 @@ uniq_words() {
 
 read_nav() {
   local prompt="$1" value
-  read -r -p "$prompt" value || return 1
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf "%s" "$prompt" > /dev/tty
+    IFS= read -r value < /dev/tty || return 1
+  else
+    read -r -p "$prompt" value || return 1
+  fi
   value="$(trim "$value")"
   case "$value" in
     0) echo "$MSG_BACK" ;;
@@ -284,14 +290,14 @@ print_rules() {
 choose_protocol() {
   local sel
   while true; do
-    header
-    echo "Выберите протокол:"
-    echo "1) UDP"
-    echo "2) TCP"
-    echo "3) UDP и TCP"
-    echo "0) Назад"
-    echo "00) Главное меню"
-    echo
+    header >&2
+    echo "Выберите протокол:" >&2
+    echo "1) UDP" >&2
+    echo "2) TCP" >&2
+    echo "3) UDP и TCP" >&2
+    echo "0) Назад" >&2
+    echo "00) Главное меню" >&2
+    echo >&2
     sel="$(read_nav "Ваш выбор: ")"
     is_nav_back "$sel" && echo "$MSG_BACK" && return 0
     is_nav_main "$sel" && echo "$MSG_MAIN" && return 0
@@ -777,8 +783,9 @@ main_menu() {
     echo
     echo -e "${DIM}WAN: ${WAN_IF:-unknown}, IPv4: ${WAN_IP:-unknown}, NAT: $NAT_MODE${RESET}"
     echo
-    read -r -p "Ваш выбор: " c
+    c="$(read_nav "Ваш выбор: ")"
     c="$(trim "$c")"
+    cls
     rc=0
     case "$c" in
       1) create_proxy_custom || rc=$? ;;
@@ -789,7 +796,8 @@ main_menu() {
       6) ports_check_menu || rc=$? ;;
       7) settings_menu || rc=$? ;;
       8) install_command; pause ;;
-      0) exit 0 ;;
+      0|"$MSG_BACK") exit 0 ;;
+      "$MSG_MAIN") continue ;;
       *) warn "Неверный выбор."; pause ;;
     esac
     # rc=10 означает запрос 00 — просто перерисовать главное меню.
