@@ -34,15 +34,23 @@ trim() {
 }
 
 cls() {
-  if cmd_exists clear; then clear; else printf '\n%.0s' {1..60}; fi
+  # Clear screen + scrollback without relying on TERM/clear.
+  printf '\033[H\033[2J\033[3J'
 }
 
 ok() { echo -e "${SOFT_GREEN}$*${RESET}"; }
-warn() { echo -e "${YELLOW}$*${RESET}"; }
+warn() { echo -e "${YELLOW}$*${RESET}" >&2; }
 err() { echo -e "${RED}$*${RESET}" >&2; }
 info() { echo -e "${CYAN}$*${RESET}"; }
 
-pause() { echo; read -r -p "Нажмите Enter чтобы продолжить... " _ || true; }
+pause() {
+  echo >&2
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    read -r -p "Нажмите Enter чтобы продолжить... " _ < /dev/tty || true
+  else
+    read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+  fi
+}
 
 header() {
   cls
@@ -60,7 +68,12 @@ require_root() {
 
 read_nav() {
   local prompt="$1" value
-  read -r -p "$prompt" value || return 1
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf "%s" "$prompt" > /dev/tty
+    IFS= read -r value < /dev/tty || return 1
+  else
+    read -r -p "$prompt" value || return 1
+  fi
   value="$(trim "$value")"
   case "$value" in
     0) echo "$MSG_BACK" ;;
@@ -470,8 +483,9 @@ main_menu() {
     echo
     echo -e "${DIM}Порт: ${CONF_PORT:-не задан}, workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}${RESET}"
     echo
-    read -r -p "Ваш выбор: " c
+    c="$(read_nav "Ваш выбор: ")"
     c="$(trim "$c")"
+    cls
     rc=0
     case "$c" in
       1) start_proxy || rc=$? ;;
@@ -485,7 +499,8 @@ main_menu() {
       9) logs_proxy || rc=$? ;;
       10) update_image || rc=$? ;;
       11) uninstall_all || rc=$? ;;
-      0) exit 0 ;;
+      0|"$MSG_BACK") exit 0 ;;
+      "$MSG_MAIN") continue ;;
       *) warn "Неверный выбор."; pause ;;
     esac
     [[ "$rc" -eq 10 ]] && continue
