@@ -14,11 +14,20 @@
 
 ---
 
+## Что входит в репозиторий
+
+```text
+proxy-udp          # менеджер TCP/UDP-перенаправлений
+mtproto-manager    # менеджер MTProto Proxy через Docker
+README.md          # английская документация
+README.ru_RU.md    # русская документация
+```
+
+---
+
 ## Быстрая установка
 
-### Установка Proxy UDP
-
-Используйте эту команду, если нужно управлять TCP/UDP-перенаправлениями:
+### Запуск Proxy UDP
 
 ```bash
 bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)")
@@ -32,9 +41,7 @@ chmod +x /root/proxy-udp
 sudo /root/proxy-udp
 ```
 
-### Установка только MTProto Manager
-
-Используйте эту команду, если нужен только менеджер MTProto Proxy:
+### Запуск только MTProto Manager
 
 ```bash
 bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)")
@@ -52,6 +59,108 @@ sudo /root/mtproto-manager
 
 ---
 
+## Быстрые локальные команды: `proxy-go` и `mtproto-go`
+
+Не нужно каждый раз заходить на GitHub и копировать длинную команду установки. Один раз установите короткую локальную команду, затем запускайте менеджер одним словом.
+
+### Установить или обновить `proxy-go`
+
+```bash
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)") install-go
+```
+
+После этого Proxy UDP можно запускать так:
+
+```bash
+sudo proxy-go
+```
+
+Также быструю команду можно установить из меню Proxy UDP:
+
+```text
+8) Установить/обновить быструю команду proxy-go и автоприменение
+```
+
+Этот пункт также создает systemd-сервис для восстановления правил Proxy UDP после перезагрузки:
+
+```bash
+sudo systemctl status proxy-go.service
+```
+
+Применить сохраненные правила вручную:
+
+```bash
+sudo proxy-go apply
+```
+
+Посмотреть статус:
+
+```bash
+sudo proxy-go status
+```
+
+Применить сетевой тюнинг:
+
+```bash
+sudo proxy-go tune
+```
+
+### Установить или обновить `mtproto-go`
+
+```bash
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)") install-go
+```
+
+После этого MTProto Manager можно запускать так:
+
+```bash
+sudo mtproto-go
+```
+
+Также быструю команду можно установить из меню MTProto Manager:
+
+```text
+13) Установить/обновить быструю команду mtproto-go
+```
+
+Полезные быстрые подкоманды MTProto:
+
+```bash
+sudo mtproto-go status
+sudo mtproto-go logs
+sudo mtproto-go restart
+sudo mtproto-go stop
+```
+
+Чтобы позже обновить локальную быструю команду, повторно выполните команду `install-go` или выберите пункт установки/обновления в меню.
+
+---
+
+## Выбор языка
+
+При первом запуске оба скрипта предлагают выбрать язык:
+
+```text
+1) English
+2) Русский
+0) Выход
+```
+
+Выбранный язык сохраняется и используется при следующих запусках.
+
+Файлы конфигурации:
+
+```text
+/etc/proxy-udp.conf
+/etc/mtproto_manager.conf
+```
+
+Сменить язык можно позже через меню:
+
+- Proxy UDP: `Настройки и диагностика высокой нагрузки` -> `Сменить язык`;
+- MTProto Manager: `Сменить язык`.
+
+---
 
 ## Возможности Proxy UDP
 
@@ -67,11 +176,12 @@ sudo /root/mtproto-manager
 - Навигация в разделах меню:
   - `0` — назад;
   - `00` — главное меню.
+- Интерфейс на русском и английском языке.
 - Настройки и диагностика высокой нагрузки для NAT/conntrack.
 - Выбор NAT-режима:
   - `SNAT` — рекомендуется для статического внешнего IPv4;
   - `MASQUERADE` — рекомендуется для динамического внешнего IPv4.
-- Возможность установить команду `proxy-udp` и systemd-сервис для автоприменения правил после перезагрузки.
+- Возможность установить команду `proxy-go` и systemd-сервис для автоприменения правил после перезагрузки.
 
 ---
 
@@ -85,7 +195,7 @@ sudo /root/mtproto-manager
 5) Посмотреть правила
 6) Проверка портов
 7) Настройки и диагностика высокой нагрузки
-8) Установить команду proxy-udp и автоприменение после перезагрузки
+8) Установить/обновить быструю команду proxy-go и автоприменение
 0) Выход
 ```
 
@@ -99,7 +209,11 @@ sudo /root/mtproto-manager
 504 508 540 580 50080 50443 51080 51443 52080 52443
 ```
 
-Порты `80` и `443` намеренно не добавляются в preset по умолчанию.
+Порты `80` и `443` намеренно не добавляются в preset по умолчанию. Если нужны порты `80` и `443`, добавьте их вручную через:
+
+```text
+1) Создать прокси / перенаправление
+```
 
 Доступные режимы:
 
@@ -114,105 +228,66 @@ sudo /root/mtproto-manager
 
 ## Использование Proxy UDP с GubernievS/AntiZapret-VPN
 
-Этот раздел нужен для пользователей [GubernievS/AntiZapret-VPN](https://github.com/GubernievS/AntiZapret-VPN), которые хотят поставить отдельный прокси-сервер между клиентами и основным сервером AntiZapret VPN.
+Этот раздел для пользователей проекта `GubernievS/AntiZapret-VPN`, которым нужно использовать отдельный прокси-сервер перед сервером AntiZapret VPN.
 
-Используйте этот вариант, если основной зарубежный сервер AntiZapret VPN заблокирован по IP-адресу или домену. В такой схеме пользователи подключаются к прокси-серверу, а прокси-сервер перенаправляет трафик на настоящий сервер AntiZapret VPN.
-
-### Рекомендуемая схема
+Типовая схема:
 
 ```text
-Устройство клиента -> сервер Proxy UDP -> сервер AntiZapret VPN
+Клиентское устройство -> Proxy UDP сервер -> AntiZapret VPN сервер
 ```
 
-Прокси-сервер обычно ставится там, откуда пользователи еще могут к нему подключиться. Основной сервер AntiZapret VPN остается настоящим VPN-сервером, на котором установлены OpenVPN, WireGuard или AmneziaWG.
+### 1. Установить AntiZapret-VPN на VPN-сервер
 
-### Шаг 1. Установить AntiZapret-VPN на основной VPN-сервер
-
-На основном сервере AntiZapret VPN установите GubernievS/AntiZapret-VPN официальной командой:
+На сервере AntiZapret VPN используйте официальную команду установки проекта AntiZapret-VPN:
 
 ```bash
-bash <(wget -qO- --no-hsts --inet4-only https://raw.githubusercontent.com/GubernievS/AntiZapret-VPN/main/setup.sh)
+bash <(wget -qO- --no-hsts --inet4-only https://raw.githubusercontent.com/GubernievS/AntiZapret-VPN/main/install.sh)
 ```
 
-При установке включите нужные протоколы и резервные порты. В AntiZapret-VPN OpenVPN поддерживает UDP и TCP и использует порты `50080` и `50443`, а также резервные порты `80`, `443`, `504` и `508`. WireGuard использует UDP-порты `51080` и `51443`, а также резервные `540` и `580`. AmneziaWG использует UDP-порты `52080` и `52443`.
+### 2. Установить Proxy UDP на прокси-сервер
 
-### Шаг 2. Установить Proxy UDP на прокси-сервер
-
-На отдельном прокси-сервере выполните:
+На прокси-сервере выполните:
 
 ```bash
 bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)")
 ```
 
-Затем выберите:
+Или один раз установите быструю команду:
+
+```bash
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)") install-go
+sudo proxy-go
+```
+
+В меню выберите:
 
 ```text
 2) AntizapretVPN by GubernievS — preset портов без 80/443
 ```
 
-Введите IPv4-адрес основного сервера AntiZapret VPN.
+Затем введите IPv4-адрес сервера AntiZapret VPN.
 
-Preset перенаправляет эти порты:
+### 3. Заменить адрес сервера в клиентских профилях
 
-```text
-504 508 540 580 50080 50443 51080 51443 52080 52443
-```
+В клиентских профилях OpenVPN, WireGuard или AmneziaWG замените IP/домен сервера AntiZapret VPN на IP/домен прокси-сервера.
 
-Порты `80` и `443` намеренно не добавляются этим preset. Если они действительно нужны, добавьте их вручную через пункт:
+### 4. Разрешить прокси-сервер на сервере AntiZapret VPN
 
-```text
-1) Создать прокси / перенаправление
-```
-
-### Шаг 3. Выбрать правильный режим preset
-
-Рекомендуемый режим:
-
-```text
-OpenVPN: 504, 508, 50080, 50443 через TCP и UDP
-WireGuard / AmneziaWG: 540, 580, 51080, 51443, 52080, 52443 через UDP
-```
-
-Режим `TCP + UDP для всех preset-портов` используйте только если намеренно хотите пробросить каждый указанный порт сразу через оба протокола.
-
-### Шаг 4. Заменить адрес сервера в клиентских профилях
-
-В профилях подключения AntiZapret замените старый IP-адрес или домен сервера AntiZapret VPN на новый IP-адрес или домен прокси-сервера.
-
-Примеры:
-
-- в файлах OpenVPN `.ovpn` измените адрес в строке `remote`;
-- в файлах WireGuard / AmneziaWG `.conf` измените адрес в строке `Endpoint`.
-
-Порт оставьте прежним, если вы специально не меняли порты на прокси-сервере.
-
-### Шаг 5. Разрешить прокси-сервер на стороне AntiZapret
-
-На основном сервере AntiZapret VPN добавьте IPv4-адрес прокси-сервера в файл:
+На сервере AntiZapret VPN добавьте IPv4-адрес прокси-сервера в файл:
 
 ```text
 /root/antizapret/config/allow-ips.txt
 ```
 
-После этого выполните:
+Затем выполните:
 
 ```bash
 /root/antizapret/parse.sh ip
 ```
 
-### Шаг 6. Проверить порты
+### 5. Примечание по MTU
 
-На прокси-сервере откройте пункт:
-
-```text
-6) Проверка портов
-```
-
-Можно проверить preset-порты до основного сервера AntiZapret VPN. TCP обычно проверяется достаточно надежно. UDP-проверка является ориентировочной, потому что UDP-сервис может не отвечать на probe-запрос, даже если перенаправление работает.
-
-### Примечание по MTU
-
-Если на прокси-сервере MTU меньше `1500`, уменьшите MTU в конфигурационных файлах OpenVPN и WireGuard/AmneziaWG на основном сервере AntiZapret VPN. Обычно MTU уменьшают на разницу между `1500` и фактическим MTU прокси-сервера.
+Если на прокси-сервере MTU меньше `1500`, уменьшите MTU в конфигурационных файлах OpenVPN и WireGuard на сервере AntiZapret VPN. Это может помочь избежать фрагментации пакетов и нестабильной работы UDP.
 
 ---
 
@@ -284,10 +359,17 @@ apt-get install -y netcat-openbsd
 
 `mtproto-manager` — отдельный интерактивный менеджер для запуска MTProto Proxy в Docker.
 
-Установка и запуск MTProto Manager:
+Запуск MTProto Manager:
 
 ```bash
 bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)")
+```
+
+Установить быструю команду `mtproto-go`:
+
+```bash
+bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)") install-go
+sudo mtproto-go
 ```
 
 Основные возможности:
@@ -298,51 +380,13 @@ bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy
 - показать ссылку для Telegram;
 - изменить внешний порт;
 - пересоздать secret/key;
+- изменить workers;
 - посмотреть Docker-логи;
 - обновить Docker-образ;
-- удалить контейнер и конфиг.
+- удалить контейнер и конфиг;
+- интерфейс на русском и английском языке.
 
 MTProto Manager использует Docker. Если Docker не установлен, скрипт может попробовать установить его автоматически на Debian/Ubuntu.
-
----
-
-## Автоприменение правил Proxy UDP после перезагрузки
-
-В главном меню Proxy UDP выберите:
-
-```text
-8) Установить команду proxy-udp и автоприменение после перезагрузки
-```
-
-После этого будет создана команда:
-
-```bash
-proxy-udp
-```
-
-И systemd-сервис:
-
-```bash
-systemctl status proxy-udp.service
-```
-
-Применить правила вручную:
-
-```bash
-sudo proxy-udp apply
-```
-
-Посмотреть статус:
-
-```bash
-sudo proxy-udp status
-```
-
-Применить сетевой тюнинг:
-
-```bash
-sudo proxy-udp tune
-```
 
 ---
 
