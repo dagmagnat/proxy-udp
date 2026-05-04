@@ -9,7 +9,7 @@ CHAIN_NAT="PROXY_UDP_NAT"
 CHAIN_FWD="PROXY_UDP_FWD"
 CHAIN_POST="PROXY_UDP_POST"
 
-# Основной набор портов проекта. 80 и 443 намеренно не включены в AntiZapret preset.
+# Main project port set. Ports 80 and 443 are intentionally not included in the AntiZapret preset.
 DEFAULT_PORTS=(504 508 540 580 50080 50443 51080 51443 52080 52443)
 ANTIZAPRET_OPENVPN_PORTS=(504 508 50080 50443)
 ANTIZAPRET_WG_PORTS=(540 580 51080 51443 52080 52443)
@@ -27,6 +27,7 @@ MSG_BACK="__BACK__"
 MSG_MAIN="__MAIN__"
 
 NAT_MODE="snat" # snat | masquerade
+UI_LANG="ru"    # ru | en
 WAN_IF=""
 WAN_IP=""
 
@@ -43,12 +44,197 @@ cls() {
   printf '\033[H\033[2J\033[3J'
 }
 
+t() {
+  local key="$1"
+  case "${UI_LANG}:${key}" in
+    ru:select_language_title) echo "Выберите язык / Select language" ;;
+    en:select_language_title) echo "Select language / Выберите язык" ;;
+    ru:language_en) echo "1) English" ;;
+    en:language_en) echo "1) English" ;;
+    ru:language_ru) echo "2) Русский" ;;
+    en:language_ru) echo "2) Русский" ;;
+    ru:exit) echo "Выход" ;;
+    en:exit) echo "Exit" ;;
+    ru:choice) echo "Ваш выбор: " ;;
+    en:choice) echo "Your choice: " ;;
+    ru:pause) echo "Нажмите Enter чтобы продолжить... " ;;
+    en:pause) echo "Press Enter to continue... " ;;
+    ru:invalid_choice) echo "Неверный выбор." ;;
+    en:invalid_choice) echo "Invalid choice." ;;
+    ru:nav_hint) echo "0 — назад, 00 — главное меню" ;;
+    en:nav_hint) echo "0 — back, 00 — main menu" ;;
+    ru:need_root) echo "Запустите скрипт от root: sudo $0" ;;
+    en:need_root) echo "Run this script as root: sudo $0" ;;
+    ru:missing_deps) echo "Не найдены зависимости:" ;;
+    en:missing_deps) echo "Missing dependencies:" ;;
+    ru:install_deps) echo "Установите их, например: apt-get update && apt-get install -y iptables iproute2 coreutils gawk grep sed" ;;
+    en:install_deps) echo "Install them, for example: apt-get update && apt-get install -y iptables iproute2 coreutils gawk grep sed" ;;
+    ru:current_rules) echo "Текущие правила:" ;;
+    en:current_rules) echo "Current rules:" ;;
+    ru:no_rules) echo "Правил нет." ;;
+    en:no_rules) echo "No rules found." ;;
+    ru:already_exists) echo "Уже есть:" ;;
+    en:already_exists) echo "Already exists:" ;;
+    ru:added) echo "Добавлено:" ;;
+    en:added) echo "Added:" ;;
+    ru:choose_protocol) echo "Выберите протокол:" ;;
+    en:choose_protocol) echo "Choose protocol:" ;;
+    ru:both_protocols) echo "3) UDP и TCP" ;;
+    en:both_protocols) echo "3) UDP and TCP" ;;
+    ru:back) echo "Назад" ;;
+    en:back) echo "Back" ;;
+    ru:main_menu_nav) echo "Главное меню" ;;
+    en:main_menu_nav) echo "Main menu" ;;
+    ru:create_title) echo "Создание прокси / перенаправления" ;;
+    en:create_title) echo "Create proxy / forwarding" ;;
+    ru:target_ip_prompt) echo "IP сервера назначения: " ;;
+    en:target_ip_prompt) echo "Destination server IP: " ;;
+    ru:bad_ip_example) echo "Неверный IP. Пример: 192.0.2.10" ;;
+    en:bad_ip_example) echo "Invalid IP. Example: 192.0.2.10" ;;
+    ru:bad_ip) echo "Неверный IP." ;;
+    en:bad_ip) echo "Invalid IP." ;;
+    ru:default_ports) echo "Порты по умолчанию:" ;;
+    en:default_ports) echo "Default ports:" ;;
+    ru:enter_default_ports) echo "Enter — использовать порты по умолчанию" ;;
+    en:enter_default_ports) echo "Enter — use default ports" ;;
+    ru:custom_ports_hint) echo "Или введите свои порты через пробел" ;;
+    en:custom_ports_hint) echo "Or enter custom ports separated by spaces" ;;
+    ru:ports_prompt) echo "Порты: " ;;
+    en:ports_prompt) echo "Ports: " ;;
+    ru:skip_bad_port) echo "Пропускаю некорректный порт:" ;;
+    en:skip_bad_port) echo "Skipping invalid port:" ;;
+    ru:no_valid_ports) echo "Не осталось валидных портов." ;;
+    en:no_valid_ports) echo "No valid ports left." ;;
+    ru:rules_applied) echo "Правила применены." ;;
+    en:rules_applied) echo "Rules applied." ;;
+    ru:nothing_added) echo "Ничего не добавлено." ;;
+    en:nothing_added) echo "Nothing added." ;;
+    ru:az_ports) echo "Порты preset:" ;;
+    en:az_ports) echo "Preset ports:" ;;
+    ru:az_no_80_443) echo "80 и 443 не добавляются по умолчанию." ;;
+    en:az_no_80_443) echo "80 and 443 are not added by default." ;;
+    ru:az_target_prompt) echo "IP AntiZapret VPN сервера назначения: " ;;
+    en:az_target_prompt) echo "Destination AntiZapret VPN server IP: " ;;
+    ru:az_mode_1) echo "1) Рекомендуемый режим: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP" ;;
+    en:az_mode_1) echo "1) Recommended mode: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP" ;;
+    ru:az_mode_2) echo "2) Все preset-порты TCP+UDP" ;;
+    en:az_mode_2) echo "2) All preset ports TCP+UDP" ;;
+    ru:az_mode_3) echo "3) Все preset-порты только UDP" ;;
+    en:az_mode_3) echo "3) All preset ports UDP only" ;;
+    ru:az_mode_4) echo "4) Все preset-порты только TCP" ;;
+    en:az_mode_4) echo "4) All preset ports TCP only" ;;
+    ru:az_applied) echo "Preset AntizapretVPN применён." ;;
+    en:az_applied) echo "AntizapretVPN preset applied." ;;
+    ru:nothing_added_maybe) echo "Ничего не добавлено. Возможно, все правила уже были." ;;
+    en:nothing_added_maybe) echo "Nothing added. The rules may already exist." ;;
+    ru:delete_numbers_prompt) echo "Номера для удаления через пробел: " ;;
+    en:delete_numbers_prompt) echo "Rule numbers to delete, separated by spaces: " ;;
+    ru:skip_bad_number) echo "Пропускаю некорректный номер:" ;;
+    en:skip_bad_number) echo "Skipping invalid number:" ;;
+    ru:no_valid_numbers) echo "Нет валидных номеров." ;;
+    en:no_valid_numbers) echo "No valid numbers." ;;
+    ru:delete_done) echo "Удаление выполнено." ;;
+    en:delete_done) echo "Deletion completed." ;;
+    ru:delete_all_warning) echo "Это удалит все правила, которыми управляет Proxy UDP. Другие правила iptables не трогаются." ;;
+    en:delete_all_warning) echo "This will delete all rules managed by Proxy UDP. Other iptables rules will not be touched." ;;
+    ru:confirm_yes) echo "Введите YES для подтверждения: " ;;
+    en:confirm_yes) echo "Type YES to confirm: " ;;
+    ru:all_deleted) echo "Все управляемые правила удалены." ;;
+    en:all_deleted) echo "All managed rules deleted." ;;
+    ru:cancelled) echo "Отменено." ;;
+    en:cancelled) echo "Cancelled." ;;
+    ru:iptables_nat_chain) echo "iptables NAT chain:" ;;
+    en:iptables_nat_chain) echo "iptables NAT chain:" ;;
+    ru:iptables_forward_chain) echo "iptables FORWARD chain:" ;;
+    en:iptables_forward_chain) echo "iptables FORWARD chain:" ;;
+    ru:tcp_open) echo "доступен" ;;
+    en:tcp_open) echo "is reachable" ;;
+    ru:tcp_closed) echo "не отвечает или закрыт" ;;
+    en:tcp_closed) echo "does not respond or is closed" ;;
+    ru:udp_ok) echo "probe отправлен, получен положительный ответ nc" ;;
+    en:udp_ok) echo "probe sent, nc reported a positive response" ;;
+    ru:udp_unclear) echo "однозначно проверить нельзя; probe отправлен, ответа нет/непонятен" ;;
+    en:udp_unclear) echo "cannot be checked reliably; probe sent, no/unclear response" ;;
+    ru:udp_need_nc) echo "для проверки нужен nc/netcat. UDP без ответа сервиса нельзя надежно проверить снаружи." ;;
+    en:udp_need_nc) echo "nc/netcat is required. UDP cannot be reliably checked from outside without a service response." ;;
+    ru:check_current_info) echo "Проверяю доступность целевых IP:порт с этого сервера." ;;
+    en:check_current_info) echo "Checking target IP:port reachability from this server." ;;
+    ru:not_external_check) echo "Важно: это не полноценная внешняя проверка с интернета." ;;
+    en:not_external_check) echo "Important: this is not a full external check from the internet." ;;
+    ru:ip_check_prompt) echo "IP для проверки: " ;;
+    en:ip_check_prompt) echo "IP to check: " ;;
+    ru:ports_space_prompt) echo "Порты через пробел: " ;;
+    en:ports_space_prompt) echo "Ports separated by spaces: " ;;
+    ru:ports_check_title) echo "Проверка портов" ;;
+    en:ports_check_title) echo "Port check" ;;
+    ru:check_current_rules) echo "1) Проверить текущие правила" ;;
+    en:check_current_rules) echo "1) Check current rules" ;;
+    ru:check_custom_ports) echo "2) Проверить IP/порты вручную" ;;
+    en:check_custom_ports) echo "2) Check IP/ports manually" ;;
+    ru:tuning_written) echo "Тюнинг записан и применён:" ;;
+    en:tuning_written) echo "Tuning saved and applied:" ;;
+    ru:conntrack_diag) echo "Диагностика conntrack:" ;;
+    en:conntrack_diag) echo "Conntrack diagnostics:" ;;
+    ru:conntrack_unavailable) echo "nf_conntrack_count недоступен. Возможно, модуль не загружен." ;;
+    en:conntrack_unavailable) echo "nf_conntrack_count is unavailable. The module may not be loaded." ;;
+    ru:conntrack_tools_missing) echo "conntrack-tools не установлен. Для расширенной статистики: apt-get install -y conntrack" ;;
+    en:conntrack_tools_missing) echo "conntrack-tools is not installed. For extended statistics: apt-get install -y conntrack" ;;
+    ru:nat_mode_title) echo "Режим исходящего NAT" ;;
+    en:nat_mode_title) echo "Outgoing NAT mode" ;;
+    ru:current_mode) echo "Текущий режим:" ;;
+    en:current_mode) echo "Current mode:" ;;
+    ru:snat_hint) echo "1) SNAT на внешний IPv4 сервера — лучше для статического IP" ;;
+    en:snat_hint) echo "1) SNAT to server public IPv4 — best for static IP" ;;
+    ru:masq_hint) echo "2) MASQUERADE — лучше для динамического IP" ;;
+    en:masq_hint) echo "2) MASQUERADE — best for dynamic IP" ;;
+    ru:snat_enabled) echo "Включён SNAT." ;;
+    en:snat_enabled) echo "SNAT enabled." ;;
+    ru:masq_enabled) echo "Включён MASQUERADE." ;;
+    en:masq_enabled) echo "MASQUERADE enabled." ;;
+    ru:settings_title) echo "Настройки и диагностика" ;;
+    en:settings_title) echo "Settings and diagnostics" ;;
+    ru:apply_tuning_menu) echo "1) Применить сетевой тюнинг для высокой нагрузки" ;;
+    en:apply_tuning_menu) echo "1) Apply network tuning for high load" ;;
+    ru:show_conntrack_menu) echo "2) Показать conntrack-статистику" ;;
+    en:show_conntrack_menu) echo "2) Show conntrack statistics" ;;
+    ru:change_nat_menu) echo "3) Сменить NAT mode: SNAT/MASQUERADE" ;;
+    en:change_nat_menu) echo "3) Change NAT mode: SNAT/MASQUERADE" ;;
+    ru:change_lang_menu) echo "4) Сменить язык / Change language" ;;
+    en:change_lang_menu) echo "4) Change language / Сменить язык" ;;
+    ru:installed) echo "Установлено:" ;;
+    en:installed) echo "Installed:" ;;
+    ru:autostart_enabled) echo "Автоприменение правил включено:" ;;
+    en:autostart_enabled) echo "Auto-apply rules enabled:" ;;
+    ru:main_menu_title) echo "Главное меню" ;;
+    en:main_menu_title) echo "Main menu" ;;
+    ru:create_proxy_menu) echo "1) Создать прокси / перенаправление" ;;
+    en:create_proxy_menu) echo "1) Create proxy / forwarding" ;;
+    ru:az_menu) echo "2) AntizapretVPN by GubernievS — preset портов без 80/443" ;;
+    en:az_menu) echo "2) AntizapretVPN by GubernievS — port preset without 80/443" ;;
+    ru:delete_selected_menu) echo "3) Удалить выбранные правила" ;;
+    en:delete_selected_menu) echo "3) Delete selected rules" ;;
+    ru:delete_all_menu) echo "4) Удалить все правила" ;;
+    en:delete_all_menu) echo "4) Delete all rules" ;;
+    ru:show_rules_menu) echo "5) Посмотреть правила" ;;
+    en:show_rules_menu) echo "5) Show rules" ;;
+    ru:port_check_menu) echo "6) Проверка портов" ;;
+    en:port_check_menu) echo "6) Port check" ;;
+    ru:settings_menu) echo "7) Настройки и диагностика высокой нагрузки" ;;
+    en:settings_menu) echo "7) Settings and high-load diagnostics" ;;
+    ru:install_menu) echo "8) Установить команду proxy-udp и автоприменение после перезагрузки" ;;
+    en:install_menu) echo "8) Install proxy-udp command and auto-apply after reboot" ;;
+    *) echo "$key" ;;
+  esac
+}
+
 pause() {
   echo >&2
+  local prompt
+  prompt="$(t pause)"
   if [[ -r /dev/tty && -w /dev/tty ]]; then
-    read -r -p "Нажмите Enter чтобы продолжить... " _ < /dev/tty || true
+    read -r -p "$prompt" _ < /dev/tty || true
   else
-    read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+    read -r -p "$prompt" _ || true
   fi
 }
 
@@ -60,13 +246,39 @@ info() { echo -e "${CYAN}$*${RESET}"; }
 header() {
   cls
   echo -e "${SOFT_GREEN}${BOLD}========== ${APP_NAME} manager ==========${RESET}"
-  echo -e "${DIM}0 — назад, 00 — главное меню${RESET}"
+  echo -e "${DIM}$(t nav_hint)${RESET}"
   echo
+}
+
+choose_language() {
+  local c
+  while true; do
+    cls
+    echo -e "${SOFT_GREEN}${BOLD}========== ${APP_NAME} ==========${RESET}"
+    echo
+    echo "$(t select_language_title)"
+    echo "$(t language_en)"
+    echo "$(t language_ru)"
+    echo "0) $(t exit)"
+    echo
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      read -r -p "$(t choice)" c < /dev/tty || exit 1
+    else
+      read -r -p "$(t choice)" c || exit 1
+    fi
+    c="$(trim "$c")"
+    case "$c" in
+      1) UI_LANG="en"; save_config 2>/dev/null || true; cls; return 0 ;;
+      2) UI_LANG="ru"; save_config 2>/dev/null || true; cls; return 0 ;;
+      0) exit 0 ;;
+      *) warn "$(t invalid_choice)"; sleep 1 ;;
+    esac
+  done
 }
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    err "Запустите скрипт от root: sudo $0"
+    err "$(t need_root)"
     exit 1
   fi
 }
@@ -77,8 +289,8 @@ ensure_prereqs() {
     cmd_exists "$c" || missing+=("$c")
   done
   if ((${#missing[@]} > 0)); then
-    err "Не найдены зависимости: ${missing[*]}"
-    err "Установите их, например: apt-get update && apt-get install -y iptables iproute2 coreutils gawk grep sed"
+    err "$(t missing_deps) ${missing[*]}"
+    err "$(t install_deps)"
     exit 1
   fi
 }
@@ -91,8 +303,10 @@ init_files() {
   if [[ ! -f "$CONFIG_FILE" ]]; then
     cat > "$CONFIG_FILE" <<EOF_CONF
 # Proxy UDP manager config
-# NAT_MODE: snat или masquerade
+# NAT_MODE: snat or masquerade
+# UI_LANG: ru or en
 NAT_MODE=snat
+UI_LANG=ru
 EOF_CONF
     chmod 600 "$CONFIG_FILE"
   fi
@@ -100,6 +314,7 @@ EOF_CONF
 
 load_config() {
   NAT_MODE="snat"
+  UI_LANG="ru"
   [[ -f "$CONFIG_FILE" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="$(trim "$line")"
@@ -110,9 +325,10 @@ load_config() {
     val="$(trim "$val")"
     case "$key" in
       NAT_MODE)
-        case "$val" in
-          snat|masquerade) NAT_MODE="$val" ;;
-        esac
+        case "$val" in snat|masquerade) NAT_MODE="$val" ;; esac
+        ;;
+      UI_LANG)
+        case "$val" in ru|en) UI_LANG="$val" ;; esac
         ;;
     esac
   done < "$CONFIG_FILE"
@@ -121,8 +337,10 @@ load_config() {
 save_config() {
   cat > "$CONFIG_FILE" <<EOF_CONF
 # Proxy UDP manager config
-# NAT_MODE: snat или masquerade
+# NAT_MODE: snat or masquerade
+# UI_LANG: ru or en
 NAT_MODE=$NAT_MODE
+UI_LANG=$UI_LANG
 EOF_CONF
   chmod 600 "$CONFIG_FILE"
 }
@@ -244,7 +462,7 @@ apply_rules() {
   normalize_state_file
   ensure_chains
 
-  local targets=""
+  local targets="" tip proto sport dport
   while read -r proto sport tip dport; do
     [[ -z "${proto:-}" || "${proto:0:1}" == "#" ]] && continue
     [[ -z "${sport:-}" || -z "${tip:-}" ]] && continue
@@ -269,21 +487,21 @@ apply_rules() {
 add_state_rule() {
   local proto="$1" sport="$2" tip="$3" dport="${4:-$2}"
   if grep -qE "^${proto}[[:space:]]+${sport}[[:space:]]+${tip}[[:space:]]+${dport}([[:space:]]|$)" "$STATE_FILE" 2>/dev/null; then
-    warn "Уже есть: $proto $sport -> $tip:$dport"
+    warn "$(t already_exists) $proto $sport -> $tip:$dport"
     return 1
   fi
   echo "$proto $sport $tip $dport" >> "$STATE_FILE"
-  ok "Добавлено: $proto $sport -> $tip:$dport"
+  ok "$(t added) $proto $sport -> $tip:$dport"
   return 0
 }
 
 print_rules() {
   normalize_state_file
   if [[ ! -s "$STATE_FILE" ]]; then
-    warn "Правил нет."
+    warn "$(t no_rules)"
     return 0
   fi
-  echo -e "${BOLD}Текущие правила:${RESET}"
+  echo -e "${BOLD}$(t current_rules)${RESET}"
   awk '{printf "%2d) %-3s %-5s -> %s:%s\n", NR, $1, $2, $3, $4}' "$STATE_FILE"
 }
 
@@ -291,21 +509,21 @@ choose_protocol() {
   local sel
   while true; do
     header >&2
-    echo "Выберите протокол:" >&2
+    echo "$(t choose_protocol)" >&2
     echo "1) UDP" >&2
     echo "2) TCP" >&2
-    echo "3) UDP и TCP" >&2
-    echo "0) Назад" >&2
-    echo "00) Главное меню" >&2
+    echo "$(t both_protocols)" >&2
+    echo "0) $(t back)" >&2
+    echo "00) $(t main_menu_nav)" >&2
     echo >&2
-    sel="$(read_nav "Ваш выбор: ")"
+    sel="$(read_nav "$(t choice)")"
     is_nav_back "$sel" && echo "$MSG_BACK" && return 0
     is_nav_main "$sel" && echo "$MSG_MAIN" && return 0
     case "$sel" in
       1) echo "udp"; return 0 ;;
       2) echo "tcp"; return 0 ;;
       3) echo "both"; return 0 ;;
-      *) warn "Неверный выбор."; pause ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
   done
 }
@@ -319,7 +537,7 @@ ports_from_input() {
     if valid_port "$p"; then
       cleaned="$cleaned $p"
     else
-      warn "Пропускаю некорректный порт: $p"
+      warn "$(t skip_bad_port) $p"
     fi
   done
   cleaned="$(uniq_words "$cleaned")"
@@ -327,16 +545,16 @@ ports_from_input() {
 }
 
 create_proxy_custom() {
-  local target_ip proto_choice ports_in ports final_ports added=0 pr p
+  local target_ip proto_choice ports_in final_ports added=0 pr p
   while true; do
     header
-    echo "Создание прокси / перенаправления"
+    echo "$(t create_title)"
     echo
-    target_ip="$(read_nav "IP сервера назначения: ")"
+    target_ip="$(read_nav "$(t target_ip_prompt)")"
     is_nav_back "$target_ip" && return 0
     is_nav_main "$target_ip" && return 10
     if valid_ip "$target_ip"; then break; fi
-    warn "Неверный IP. Пример: 192.0.2.10"
+    warn "$(t bad_ip_example)"
     pause
   done
 
@@ -353,17 +571,17 @@ create_proxy_custom() {
 
   while true; do
     header
-    echo "Порты по умолчанию: ${DEFAULT_PORTS[*]}"
+    echo "$(t default_ports) ${DEFAULT_PORTS[*]}"
     echo
-    echo "Enter — использовать порты по умолчанию"
-    echo "Или введите свои порты через пробел"
+    echo "$(t enter_default_ports)"
+    echo "$(t custom_ports_hint)"
     echo
-    ports_in="$(read_nav "Порты: ")"
+    ports_in="$(read_nav "$(t ports_prompt)")"
     is_nav_back "$ports_in" && return 0
     is_nav_main "$ports_in" && return 10
     final_ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
     [[ -n "${final_ports// }" ]] && break
-    warn "Не осталось валидных портов."
+    warn "$(t no_valid_ports)"
     pause
   done
 
@@ -375,9 +593,9 @@ create_proxy_custom() {
 
   if [[ "$added" -eq 1 ]]; then
     apply_rules
-    ok "Правила применены."
+    ok "$(t rules_applied)"
   else
-    warn "Ничего не добавлено."
+    warn "$(t nothing_added)"
   fi
   pause
 }
@@ -387,28 +605,28 @@ create_antizapret_preset() {
   while true; do
     header
     echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
-    echo "Порты preset: ${DEFAULT_PORTS[*]}"
-    echo "80 и 443 не добавляются по умолчанию."
+    echo "$(t az_ports) ${DEFAULT_PORTS[*]}"
+    echo "$(t az_no_80_443)"
     echo
-    target_ip="$(read_nav "IP AntiZapret VPN сервера назначения: ")"
+    target_ip="$(read_nav "$(t az_target_prompt)")"
     is_nav_back "$target_ip" && return 0
     is_nav_main "$target_ip" && return 10
     if valid_ip "$target_ip"; then break; fi
-    warn "Неверный IP."
+    warn "$(t bad_ip)"
     pause
   done
 
   while true; do
     header
     echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
-    echo "1) Рекомендуемый режим: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP"
-    echo "2) Все preset-порты TCP+UDP"
-    echo "3) Все preset-порты только UDP"
-    echo "4) Все preset-порты только TCP"
-    echo "0) Назад"
-    echo "00) Главное меню"
+    echo "$(t az_mode_1)"
+    echo "$(t az_mode_2)"
+    echo "$(t az_mode_3)"
+    echo "$(t az_mode_4)"
+    echo "0) $(t back)"
+    echo "00) $(t main_menu_nav)"
     echo
-    mode="$(read_nav "Ваш выбор: ")"
+    mode="$(read_nav "$(t choice)")"
     is_nav_back "$mode" && return 0
     is_nav_main "$mode" && return 10
     case "$mode" in
@@ -441,15 +659,15 @@ create_antizapret_preset() {
         done
         break
         ;;
-      *) warn "Неверный выбор."; pause ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
   done
 
   if [[ "$added" -eq 1 ]]; then
     apply_rules
-    ok "Preset AntizapretVPN применён."
+    ok "$(t az_applied)"
   else
-    warn "Ничего не добавлено. Возможно, все правила уже были."
+    warn "$(t nothing_added_maybe)"
   fi
   pause
 }
@@ -460,18 +678,18 @@ delete_selected_rules() {
   print_rules
   [[ -s "$STATE_FILE" ]] || { pause; return 0; }
   echo
-  nums="$(read_nav "Номера для удаления через пробел: ")"
+  nums="$(read_nav "$(t delete_numbers_prompt)")"
   is_nav_back "$nums" && return 0
   is_nav_main "$nums" && return 10
   for n in $nums; do
     if [[ "$n" =~ ^[0-9]+$ ]]; then
       filtered="$filtered $n"
     else
-      warn "Пропускаю некорректный номер: $n"
+      warn "$(t skip_bad_number) $n"
     fi
   done
   filtered="$(trim "$filtered")"
-  [[ -z "$filtered" ]] && { warn "Нет валидных номеров."; pause; return 0; }
+  [[ -z "$filtered" ]] && { warn "$(t no_valid_numbers)"; pause; return 0; }
 
   tmp="$(mktemp)"
   awk -v nums="$filtered" '
@@ -481,24 +699,24 @@ delete_selected_rules() {
   cat "$tmp" > "$STATE_FILE"
   rm -f "$tmp"
   apply_rules
-  ok "Удаление выполнено."
+  ok "$(t delete_done)"
   pause
 }
 
 delete_all_rules() {
   local ans
   header
-  warn "Это удалит все правила, которыми управляет $APP_NAME. Другие правила iptables не трогаются."
+  warn "$(t delete_all_warning)"
   echo
-  ans="$(read_nav "Введите YES для подтверждения: ")"
+  ans="$(read_nav "$(t confirm_yes)")"
   is_nav_back "$ans" && return 0
   is_nav_main "$ans" && return 10
   if [[ "$ans" == "YES" ]]; then
     : > "$STATE_FILE"
     apply_rules
-    ok "Все управляемые правила удалены."
+    ok "$(t all_deleted)"
   else
-    warn "Отменено."
+    warn "$(t cancelled)"
   fi
   pause
 }
@@ -511,10 +729,10 @@ show_iptables_rules() {
   info "WAN IPv4     : ${WAN_IP:-unknown}"
   info "NAT mode     : $NAT_MODE"
   echo
-  echo "iptables NAT chain:"
+  echo "$(t iptables_nat_chain)"
   iptables -w -t nat -S "$CHAIN_NAT" 2>/dev/null || true
   echo
-  echo "iptables FORWARD chain:"
+  echo "$(t iptables_forward_chain)"
   iptables -w -S "$CHAIN_FWD" 2>/dev/null || true
   pause
 }
@@ -522,9 +740,9 @@ show_iptables_rules() {
 check_tcp() {
   local host="$1" port="$2"
   if timeout 3 bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then
-    ok "TCP $host:$port доступен"
+    ok "TCP $host:$port $(t tcp_open)"
   else
-    err "TCP $host:$port не отвечает или закрыт"
+    err "TCP $host:$port $(t tcp_closed)"
   fi
 }
 
@@ -532,12 +750,12 @@ check_udp() {
   local host="$1" port="$2"
   if cmd_exists nc; then
     if timeout 4 nc -zuv -w2 "$host" "$port" >/tmp/proxy_udp_nc.out 2>&1; then
-      ok "UDP $host:$port: probe отправлен, получен положительный ответ nc"
+      ok "UDP $host:$port: $(t udp_ok)"
     else
-      warn "UDP $host:$port: однозначно проверить нельзя; probe отправлен, ответа нет/непонятен"
+      warn "UDP $host:$port: $(t udp_unclear)"
     fi
   else
-    warn "UDP $host:$port: для проверки нужен nc/netcat. UDP без ответа сервиса нельзя надежно проверить снаружи."
+    warn "UDP $host:$port: $(t udp_need_nc)"
   fi
 }
 
@@ -545,12 +763,12 @@ check_current_rules() {
   header
   normalize_state_file
   if [[ ! -s "$STATE_FILE" ]]; then
-    warn "Правил нет."
+    warn "$(t no_rules)"
     pause
     return 0
   fi
-  echo "Проверяю доступность целевых IP:порт с этого сервера."
-  echo "Важно: это не полноценная внешняя проверка с интернета."
+  echo "$(t check_current_info)"
+  echo "$(t not_external_check)"
   echo
   while read -r proto sport tip dport; do
     dport="${dport:-$sport}"
@@ -566,11 +784,11 @@ check_custom_ports() {
   local target_ip proto_choice ports_in ports p
   while true; do
     header
-    target_ip="$(read_nav "IP для проверки: ")"
+    target_ip="$(read_nav "$(t ip_check_prompt)")"
     is_nav_back "$target_ip" && return 0
     is_nav_main "$target_ip" && return 10
     valid_ip "$target_ip" && break
-    warn "Неверный IP."
+    warn "$(t bad_ip)"
     pause
   done
   proto_choice="$(choose_protocol)"
@@ -578,12 +796,12 @@ check_custom_ports() {
   is_nav_main "$proto_choice" && return 10
   while true; do
     header
-    ports_in="$(read_nav "Порты через пробел: ")"
+    ports_in="$(read_nav "$(t ports_space_prompt)")"
     is_nav_back "$ports_in" && return 0
     is_nav_main "$ports_in" && return 10
     ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
     [[ -n "${ports// }" ]] && break
-    warn "Нет валидных портов."
+    warn "$(t no_valid_ports)"
     pause
   done
   header
@@ -601,19 +819,19 @@ ports_check_menu() {
   local c
   while true; do
     header
-    echo "Проверка портов"
-    echo "1) Проверить текущие правила"
-    echo "2) Проверить IP/порты вручную"
-    echo "0) Назад"
-    echo "00) Главное меню"
+    echo "$(t ports_check_title)"
+    echo "$(t check_current_rules)"
+    echo "$(t check_custom_ports)"
+    echo "0) $(t back)"
+    echo "00) $(t main_menu_nav)"
     echo
-    c="$(read_nav "Ваш выбор: ")"
+    c="$(read_nav "$(t choice)")"
     is_nav_back "$c" && return 0
     is_nav_main "$c" && return 10
     case "$c" in
       1) check_current_rules || return 10 ;;
       2) check_custom_ports || return 10 ;;
-      *) warn "Неверный выбор."; pause ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
   done
 }
@@ -656,7 +874,7 @@ net.netfilter.nf_conntrack_tcp_timeout_established=7200
 EOF_SYSCTL
   echo nf_conntrack > /etc/modules-load.d/proxy-udp-nf_conntrack.conf
   sysctl --system >/dev/null || true
-  ok "Тюнинг записан в $SYSCTL_FILE и применён."
+  ok "$(t tuning_written) $SYSCTL_FILE"
   echo
   show_conntrack_status false
   pause
@@ -665,11 +883,11 @@ EOF_SYSCTL
 show_conntrack_status() {
   local do_header="${1:-true}"
   [[ "$do_header" == "true" ]] && header
-  echo "Диагностика conntrack:"
+  echo "$(t conntrack_diag)"
   if [[ -r /proc/sys/net/netfilter/nf_conntrack_count ]]; then
     echo "nf_conntrack_count: $(cat /proc/sys/net/netfilter/nf_conntrack_count)"
   else
-    warn "nf_conntrack_count недоступен. Возможно, модуль не загружен."
+    warn "$(t conntrack_unavailable)"
   fi
   if [[ -r /proc/sys/net/netfilter/nf_conntrack_max ]]; then
     echo "nf_conntrack_max  : $(cat /proc/sys/net/netfilter/nf_conntrack_max)"
@@ -683,7 +901,7 @@ show_conntrack_status() {
   if cmd_exists conntrack; then
     conntrack -S 2>/dev/null || true
   else
-    warn "conntrack-tools не установлен. Для расширенной статистики: apt-get install -y conntrack"
+    warn "$(t conntrack_tools_missing)"
   fi
   [[ "$do_header" == "true" ]] && pause
 }
@@ -692,21 +910,21 @@ nat_mode_menu() {
   local c
   while true; do
     header
-    echo "Режим исходящего NAT"
-    echo "Текущий режим: $NAT_MODE"
+    echo "$(t nat_mode_title)"
+    echo "$(t current_mode) $NAT_MODE"
     echo
-    echo "1) SNAT на внешний IPv4 сервера — лучше для статического IP"
-    echo "2) MASQUERADE — лучше для динамического IP"
-    echo "0) Назад"
-    echo "00) Главное меню"
+    echo "$(t snat_hint)"
+    echo "$(t masq_hint)"
+    echo "0) $(t back)"
+    echo "00) $(t main_menu_nav)"
     echo
-    c="$(read_nav "Ваш выбор: ")"
+    c="$(read_nav "$(t choice)")"
     is_nav_back "$c" && return 0
     is_nav_main "$c" && return 10
     case "$c" in
-      1) NAT_MODE="snat"; save_config; apply_rules; ok "Включён SNAT."; pause ;;
-      2) NAT_MODE="masquerade"; save_config; apply_rules; ok "Включён MASQUERADE."; pause ;;
-      *) warn "Неверный выбор."; pause ;;
+      1) NAT_MODE="snat"; save_config; apply_rules; ok "$(t snat_enabled)"; pause ;;
+      2) NAT_MODE="masquerade"; save_config; apply_rules; ok "$(t masq_enabled)"; pause ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
   done
 }
@@ -715,21 +933,23 @@ settings_menu() {
   local c
   while true; do
     header
-    echo "Настройки и диагностика"
-    echo "1) Применить сетевой тюнинг для высокой нагрузки"
-    echo "2) Показать conntrack-статистику"
-    echo "3) Сменить NAT mode: SNAT/MASQUERADE"
-    echo "0) Назад"
-    echo "00) Главное меню"
+    echo "$(t settings_title)"
+    echo "$(t apply_tuning_menu)"
+    echo "$(t show_conntrack_menu)"
+    echo "$(t change_nat_menu)"
+    echo "$(t change_lang_menu)"
+    echo "0) $(t back)"
+    echo "00) $(t main_menu_nav)"
     echo
-    c="$(read_nav "Ваш выбор: ")"
+    c="$(read_nav "$(t choice)")"
     is_nav_back "$c" && return 0
     is_nav_main "$c" && return 10
     case "$c" in
       1) apply_tuning || return 10 ;;
       2) show_conntrack_status true ;;
       3) nat_mode_menu || return 10 ;;
-      *) warn "Неверный выбор."; pause ;;
+      4) choose_language ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
   done
 }
@@ -754,8 +974,8 @@ WantedBy=multi-user.target
 EOF_UNIT
   systemctl daemon-reload
   systemctl enable proxy-udp.service >/dev/null
-  ok "Установлено: $dst"
-  ok "Автоприменение правил включено: proxy-udp.service"
+  ok "$(t installed) $dst"
+  ok "$(t autostart_enabled) proxy-udp.service"
 }
 
 main_menu() {
@@ -764,26 +984,27 @@ main_menu() {
   ensure_prereqs
   init_files
   load_config
+  choose_language
   refresh_net_info
   apply_rules
 
   while true; do
     refresh_net_info
     header
-    echo -e "${BOLD}Главное меню${RESET}"
-    echo "1) Создать прокси / перенаправление"
-    echo -e "2) ${SOFT_GREEN}AntizapretVPN by GubernievS${RESET} — preset портов без 80/443"
-    echo "3) Удалить выбранные правила"
-    echo "4) Удалить все правила"
-    echo "5) Посмотреть правила"
-    echo "6) Проверка портов"
-    echo "7) Настройки и диагностика высокой нагрузки"
-    echo "8) Установить команду proxy-udp и автоприменение после перезагрузки"
-    echo "0) Выход"
+    echo -e "${BOLD}$(t main_menu_title)${RESET}"
+    echo "$(t create_proxy_menu)"
+    echo -e "2) ${SOFT_GREEN}AntizapretVPN by GubernievS${RESET} — $([[ "$UI_LANG" == "ru" ]] && echo "preset портов без 80/443" || echo "port preset without 80/443")"
+    echo "$(t delete_selected_menu)"
+    echo "$(t delete_all_menu)"
+    echo "$(t show_rules_menu)"
+    echo "$(t port_check_menu)"
+    echo "$(t settings_menu)"
+    echo "$(t install_menu)"
+    echo "0) $(t exit)"
     echo
-    echo -e "${DIM}WAN: ${WAN_IF:-unknown}, IPv4: ${WAN_IP:-unknown}, NAT: $NAT_MODE${RESET}"
+    echo -e "${DIM}WAN: ${WAN_IF:-unknown}, IPv4: ${WAN_IP:-unknown}, NAT: $NAT_MODE, LANG: $UI_LANG${RESET}"
     echo
-    c="$(read_nav "Ваш выбор: ")"
+    c="$(read_nav "$(t choice)")"
     c="$(trim "$c")"
     cls
     rc=0
@@ -798,9 +1019,8 @@ main_menu() {
       8) install_command; pause ;;
       0|"$MSG_BACK") exit 0 ;;
       "$MSG_MAIN") continue ;;
-      *) warn "Неверный выбор."; pause ;;
+      *) warn "$(t invalid_choice)"; pause ;;
     esac
-    # rc=10 означает запрос 00 — просто перерисовать главное меню.
     [[ "$rc" -eq 10 ]] && continue
   done
 }
@@ -813,7 +1033,7 @@ case "${1:-}" in
     require_root; ensure_prereqs; init_files; load_config; refresh_net_info; print_rules; show_conntrack_status false
     ;;
   tune)
-    require_root; ensure_prereqs; init_files; apply_tuning
+    require_root; ensure_prereqs; init_files; load_config; apply_tuning
     ;;
   *)
     main_menu
