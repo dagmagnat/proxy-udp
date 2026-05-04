@@ -1,33 +1,129 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STATE_FILE="/etc/redirect_manager.rules"
-CHAIN_NAT="REDIR_MGR"
-CHAIN_FWD="REDIR_MGR_FWD"
+APP_NAME="Proxy UDP"
+STATE_FILE="/etc/proxy-udp.rules"
+CONFIG_FILE="/etc/proxy-udp.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-proxy-udp-manager.conf"
+CHAIN_NAT="PROXY_UDP_NAT"
+CHAIN_FWD="PROXY_UDP_FWD"
+CHAIN_POST="PROXY_UDP_POST"
 
-DEFAULT_PORTS=(1234 5959 35756 35757 56123 56124 50080 50443 51080 51443 52080 52443)
+# Основной набор портов проекта. 80 и 443 намеренно не включены в AntiZapret preset.
+DEFAULT_PORTS=(504 508 540 580 50080 50443 51080 51443 52080 52443)
+ANTIZAPRET_OPENVPN_PORTS=(504 508 50080 50443)
+ANTIZAPRET_WG_PORTS=(540 580 51080 51443 52080 52443)
+
+SOFT_GREEN='\033[38;5;114m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+MSG_BACK="__BACK__"
+MSG_MAIN="__MAIN__"
+
+NAT_MODE="snat" # snat | masquerade
+WAN_IF=""
+WAN_IP=""
+
+cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+
+trim() {
+  local s="${1//$'\r'/}"
+  s="$(printf "%s" "$s" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  printf "%s" "$s"
+}
+
+cls() {
+  if cmd_exists clear; then
+    clear
+  else
+    printf '\n%.0s' {1..60}
+  fi
+}
+
+pause() {
+  echo
+  read -r -p "Нажмите Enter чтобы продолжить... " _ || true
+}
+
+ok() { echo -e "${SOFT_GREEN}$*${RESET}"; }
+warn() { echo -e "${YELLOW}$*${RESET}"; }
+err() { echo -e "${RED}$*${RESET}" >&2; }
+info() { echo -e "${CYAN}$*${RESET}"; }
+
+header() {
+  cls
+  echo -e "${SOFT_GREEN}${BOLD}========== ${APP_NAME} manager ==========${RESET}"
+  echo -e "${DIM}0 — назад, 00 — главное меню${RESET}"
+  echo
+}
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    echo "Запустите скрипт от root: sudo $0" >&2
+    err "Запустите скрипт от root: sudo $0"
     exit 1
   fi
 }
 
 ensure_prereqs() {
-  command -v iptables >/dev/null 2>&1 || { echo "Не найден iptables. Установите iptables." >&2; exit 1; }
-  command -v ip >/dev/null 2>&1 || { echo "Не найден ip (iproute2)." >&2; exit 1; }
-  command -v sysctl >/dev/null 2>&1 || { echo "Не найден sysctl." >&2; exit 1; }
-  command -v awk >/dev/null 2>&1 || { echo "Не найден awk." >&2; exit 1; }
-  command -v nl >/dev/null 2>&1 || { echo "Не найден nl (coreutils)." >&2; exit 1; }
-  command -v grep >/dev/null 2>&1 || { echo "Не найден grep." >&2; exit 1; }
+  local missing=()
+  for c in iptables ip sysctl awk grep sed sort uniq nl; do
+    cmd_exists "$c" || missing+=("$c")
+  done
+  if ((${#missing[@]} > 0)); then
+    err "Не найдены зависимости: ${missing[*]}"
+    err "Установите их, например: apt-get update && apt-get install -y iptables iproute2 coreutils gawk grep sed"
+    exit 1
+  fi
 }
 
-init_state() {
+init_files() {
   if [[ ! -f "$STATE_FILE" ]]; then
     touch "$STATE_FILE"
     chmod 600 "$STATE_FILE"
   fi
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat > "$CONFIG_FILE" <<EOF_CONF
+# Proxy UDP manager config
+# NAT_MODE: snat или masquerade
+NAT_MODE=snat
+EOF_CONF
+    chmod 600 "$CONFIG_FILE"
+  fi
+}
+
+load_config() {
+  NAT_MODE="snat"
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim "$line")"
+    [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *=* ]] && continue
+    local key="${line%%=*}"
+    local val="${line#*=}"
+    key="$(trim "$key")"
+    val="$(trim "$val")"
+    case "$key" in
+      NAT_MODE)
+        case "$val" in
+          snat|masquerade) NAT_MODE="$val" ;;
+        esac
+        ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
+save_config() {
+  cat > "$CONFIG_FILE" <<EOF_CONF
+# Proxy UDP manager config
+# NAT_MODE: snat или masquerade
+NAT_MODE=$NAT_MODE
+EOF_CONF
+  chmod 600 "$CONFIG_FILE"
 }
 
 detect_wan_if() {
@@ -36,270 +132,682 @@ detect_wan_if() {
   if [[ -n "${ifn:-}" ]]; then
     echo "$ifn"
   else
-    ip -br link | awk '$1 !~ /lo/ {print $1; exit}'
+    ip -br link | awk '$1 !~ /^lo$/ {print $1; exit}'
   fi
 }
 
-enable_ip_forward() {
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  if ! grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null; then
-    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+detect_wan_ip() {
+  local ipaddr
+  ipaddr="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1)"
+  if [[ -n "${ipaddr:-}" ]]; then
+    echo "$ipaddr"
+  else
+    ip -4 addr show dev "$WAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1
   fi
+}
+
+refresh_net_info() {
+  WAN_IF="$(detect_wan_if)"
+  WAN_IP="$(detect_wan_ip)"
 }
 
 valid_ip() {
-  local ip="$1"
+  local ip
+  ip="$(trim "${1:-}")"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   local o1 o2 o3 o4
   IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
   for o in "$o1" "$o2" "$o3" "$o4"; do
+    [[ "$o" =~ ^[0-9]+$ ]] || return 1
     ((o >= 0 && o <= 255)) || return 1
   done
   return 0
 }
 
 valid_port() {
-  local p="$1"
-  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  local p
+  p="$(trim "${1:-}")"
+  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 1
   ((p >= 1 && p <= 65535)) || return 1
   return 0
 }
 
-uniq_ports() {
-  local in="$1"
+uniq_words() {
+  awk '{for(i=1;i<=NF;i++){if(!seen[$i]++){out=out (out?OFS:"") $i}}} END{print out}' <<< "$*"
+}
+
+read_nav() {
+  local prompt="$1" value
+  read -r -p "$prompt" value || return 1
+  value="$(trim "$value")"
+  case "$value" in
+    0) echo "$MSG_BACK" ;;
+    00) echo "$MSG_MAIN" ;;
+    *) echo "$value" ;;
+  esac
+}
+
+is_nav_back() { [[ "${1:-}" == "$MSG_BACK" ]]; }
+is_nav_main() { [[ "${1:-}" == "$MSG_MAIN" ]]; }
+
+normalize_state_file() {
+  local tmp
+  tmp="$(mktemp)"
   awk '
-    {
-      for(i=1;i<=NF;i++){
-        if(!seen[$i]++){
-          out = out (out?OFS:"") $i
-        }
+    NF >= 3 && $1 !~ /^#/ {
+      proto=tolower($1); sport=$2; tip=$3; dport=$4;
+      if(dport=="") dport=sport;
+      if((proto=="tcp" || proto=="udp") && sport ~ /^[0-9]+$/ && dport ~ /^[0-9]+$/) {
+        key=proto " " sport " " tip " " dport;
+        if(!seen[key]++) print proto, sport, tip, dport;
       }
     }
-    END{ print out }
-  ' <<< "$in"
+  ' "$STATE_FILE" > "$tmp"
+  cat "$tmp" > "$STATE_FILE"
+  rm -f "$tmp"
+  chmod 600 "$STATE_FILE"
+}
+
+enable_ip_forward() {
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null || true
+}
+
+ensure_chains() {
+  iptables -w -t nat -N "$CHAIN_NAT" 2>/dev/null || true
+  iptables -w -t nat -N "$CHAIN_POST" 2>/dev/null || true
+  iptables -w -N "$CHAIN_FWD" 2>/dev/null || true
+
+  iptables -w -t nat -F "$CHAIN_NAT"
+  iptables -w -t nat -F "$CHAIN_POST"
+  iptables -w -F "$CHAIN_FWD"
+
+  while iptables -w -t nat -D PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT" 2>/dev/null; do :; done
+  iptables -w -t nat -A PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT"
+
+  while iptables -w -t nat -D POSTROUTING -j "$CHAIN_POST" 2>/dev/null; do :; done
+  iptables -w -t nat -A POSTROUTING -j "$CHAIN_POST"
+
+  while iptables -w -D FORWARD -j "$CHAIN_FWD" 2>/dev/null; do :; done
+  iptables -w -A FORWARD -j "$CHAIN_FWD"
 }
 
 apply_rules() {
-  local WAN_IF="$1"
-
+  refresh_net_info
+  load_config
   enable_ip_forward
+  normalize_state_file
+  ensure_chains
 
-  iptables -t nat -N "$CHAIN_NAT" 2>/dev/null || true
-  iptables -t nat -F "$CHAIN_NAT"
-
-  iptables -N "$CHAIN_FWD" 2>/dev/null || true
-  iptables -F "$CHAIN_FWD"
-
-  iptables -t nat -D PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT" 2>/dev/null || true
-  iptables -t nat -A PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT"
-
-  iptables -D FORWARD -j "$CHAIN_FWD" 2>/dev/null || true
-  iptables -A FORWARD -j "$CHAIN_FWD"
-
-  iptables -t nat -C POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
-
-  while read -r proto port tip; do
+  local targets=""
+  while read -r proto sport tip dport; do
     [[ -z "${proto:-}" || "${proto:0:1}" == "#" ]] && continue
-    [[ -z "${port:-}" || -z "${tip:-}" ]] && continue
+    [[ -z "${sport:-}" || -z "${tip:-}" ]] && continue
+    dport="${dport:-$sport}"
 
-    iptables -t nat -A "$CHAIN_NAT" -p "$proto" --dport "$port" -j DNAT --to-destination "${tip}:${port}"
-
-    iptables -A "$CHAIN_FWD" -p "$proto" -d "$tip" --dport "$port" -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
-    iptables -A "$CHAIN_FWD" -p "$proto" -s "$tip" --sport "$port" -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -w -t nat -A "$CHAIN_NAT" -p "$proto" --dport "$sport" -j DNAT --to-destination "${tip}:${dport}"
+    iptables -w -A "$CHAIN_FWD" -p "$proto" -d "$tip" --dport "$dport" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    iptables -w -A "$CHAIN_FWD" -p "$proto" -s "$tip" --sport "$dport" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    targets="$targets $tip"
   done < "$STATE_FILE"
+
+  targets="$(uniq_words "$targets")"
+  for tip in $targets; do
+    if [[ "$NAT_MODE" == "snat" && -n "${WAN_IP:-}" ]]; then
+      iptables -w -t nat -A "$CHAIN_POST" -o "$WAN_IF" -d "$tip" -j SNAT --to-source "$WAN_IP"
+    else
+      iptables -w -t nat -A "$CHAIN_POST" -o "$WAN_IF" -d "$tip" -j MASQUERADE
+    fi
+  done
+}
+
+add_state_rule() {
+  local proto="$1" sport="$2" tip="$3" dport="${4:-$2}"
+  if grep -qE "^${proto}[[:space:]]+${sport}[[:space:]]+${tip}[[:space:]]+${dport}([[:space:]]|$)" "$STATE_FILE" 2>/dev/null; then
+    warn "Уже есть: $proto $sport -> $tip:$dport"
+    return 1
+  fi
+  echo "$proto $sport $tip $dport" >> "$STATE_FILE"
+  ok "Добавлено: $proto $sport -> $tip:$dport"
+  return 0
 }
 
 print_rules() {
+  normalize_state_file
   if [[ ! -s "$STATE_FILE" ]]; then
-    echo "Правил нет."
-    return
+    warn "Правил нет."
+    return 0
   fi
-  echo "Текущие правила (proto port -> target):"
-  nl -w2 -s') ' "$STATE_FILE"
+  echo -e "${BOLD}Текущие правила:${RESET}"
+  awk '{printf "%2d) %-3s %-5s -> %s:%s\n", NR, $1, $2, $3, $4}' "$STATE_FILE"
 }
 
-# меню в stderr, результат в stdout
-choose_protocol_menu() {
+choose_protocol() {
+  local sel
   while true; do
-    echo "" >&2
-    echo "Выберите протокол:" >&2
-    echo "1) UDP" >&2
-    echo "2) TCP" >&2
-    echo "3) UDP и TCP" >&2
-    echo "0) Назад" >&2
-    echo "" >&2
-    read -r -p "Ваш выбор: " sel >&2
-
+    header
+    echo "Выберите протокол:"
+    echo "1) UDP"
+    echo "2) TCP"
+    echo "3) UDP и TCP"
+    echo "0) Назад"
+    echo "00) Главное меню"
+    echo
+    sel="$(read_nav "Ваш выбор: ")"
+    is_nav_back "$sel" && echo "$MSG_BACK" && return 0
+    is_nav_main "$sel" && echo "$MSG_MAIN" && return 0
     case "$sel" in
-      1) echo "udp";  return 0 ;;
-      2) echo "tcp";  return 0 ;;
+      1) echo "udp"; return 0 ;;
+      2) echo "tcp"; return 0 ;;
       3) echo "both"; return 0 ;;
-      0) echo "back"; return 0 ;;
-      *) echo "Неверный выбор, попробуйте снова." >&2 ;;
+      *) warn "Неверный выбор."; pause ;;
     esac
   done
 }
 
-add_rule() {
-  local WAN_IF="$1"
-
-  echo
-  read -r -p "IP сервера назначения (куда перенаправлять) или 0 (назад): " target_ip
-  [[ "$target_ip" == "0" ]] && return 0
-  if ! valid_ip "$target_ip"; then
-    echo "Неверный IP."
-    return 0
+ports_from_input() {
+  local input="$1" default_list="$2" cleaned="" p
+  if [[ -z "${input// }" ]]; then
+    input="$default_list"
   fi
-
-  local proto_choice
-  proto_choice="$(choose_protocol_menu)"
-  [[ "$proto_choice" == "back" ]] && return 0
-
-  local protos=()
-  case "$proto_choice" in
-    udp)  protos=("udp") ;;
-    tcp)  protos=("tcp") ;;
-    both) protos=("udp" "tcp") ;;
-  esac
-
-  echo
-  echo "Порты по умолчанию:"
-  echo "${DEFAULT_PORTS[*]}"
-  echo
-
-  echo "Логика:"
-  echo "- Нажмите Enter: будут использованы ТОЛЬКО порты по умолчанию"
-  echo "- Введите свои порты: будут использованы ТОЛЬКО ваши порты (дефолт НЕ добавляется)"
-  echo
-  read -r -p "Порты (через пробел) или Enter (дефолт), 0 (назад): " ports_in
-  [[ "$ports_in" == "0" ]] && return 0
-
-  local selected_ports=""
-  if [[ -z "${ports_in// }" ]]; then
-    # Enter -> только дефолт
-    selected_ports="${DEFAULT_PORTS[*]}"
-  else
-    # Ввели свои -> только свои (без дефолта)
-    selected_ports="$ports_in"
-  fi
-
-  # очистка/валидация
-  local cleaned=""
-  for p in $selected_ports; do
+  for p in $input; do
     if valid_port "$p"; then
       cleaned="$cleaned $p"
     else
-      echo "Пропускаю некорректный порт: $p"
+      warn "Пропускаю некорректный порт: $p"
     fi
   done
-  cleaned="${cleaned# }"
+  cleaned="$(uniq_words "$cleaned")"
+  echo "$cleaned"
+}
 
-  if [[ -z "${cleaned// }" ]]; then
-    echo "Не осталось валидных портов — отмена."
-    return 0
-  fi
+create_proxy_custom() {
+  local target_ip proto_choice ports_in ports final_ports added=0 pr p
+  while true; do
+    header
+    echo "Создание прокси / перенаправления"
+    echo
+    target_ip="$(read_nav "IP сервера назначения: ")"
+    is_nav_back "$target_ip" && return 0
+    is_nav_main "$target_ip" && return 10
+    if valid_ip "$target_ip"; then break; fi
+    warn "Неверный IP. Пример: 192.0.2.10"
+    pause
+  done
 
-  local final_ports
-  final_ports="$(uniq_ports "$cleaned")"
+  proto_choice="$(choose_protocol)"
+  is_nav_back "$proto_choice" && return 0
+  is_nav_main "$proto_choice" && return 10
 
-  local added_any=0
+  local protos=()
+  case "$proto_choice" in
+    udp) protos=(udp) ;;
+    tcp) protos=(tcp) ;;
+    both) protos=(udp tcp) ;;
+  esac
+
+  while true; do
+    header
+    echo "Порты по умолчанию: ${DEFAULT_PORTS[*]}"
+    echo
+    echo "Enter — использовать порты по умолчанию"
+    echo "Или введите свои порты через пробел"
+    echo
+    ports_in="$(read_nav "Порты: ")"
+    is_nav_back "$ports_in" && return 0
+    is_nav_main "$ports_in" && return 10
+    final_ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
+    [[ -n "${final_ports// }" ]] && break
+    warn "Не осталось валидных портов."
+    pause
+  done
+
   for p in $final_ports; do
     for pr in "${protos[@]}"; do
-      if grep -qE "^${pr}[[:space:]]+${p}[[:space:]]+${target_ip}$" "$STATE_FILE"; then
-        echo "Уже есть: $pr $p -> $target_ip"
-      else
-        echo "${pr} ${p} ${target_ip}" >> "$STATE_FILE"
-        echo "Добавлено: $pr $p -> $target_ip"
-        added_any=1
-      fi
+      add_state_rule "$pr" "$p" "$target_ip" "$p" && added=1 || true
     done
   done
 
-  if [[ "$added_any" -eq 1 ]]; then
-    apply_rules "$WAN_IF"
-    echo "Готово."
+  if [[ "$added" -eq 1 ]]; then
+    apply_rules
+    ok "Правила применены."
   else
-    echo "Ничего не добавлено (возможно, все правила уже существовали)."
+    warn "Ничего не добавлено."
   fi
+  pause
 }
 
-delete_rule() {
-  local WAN_IF="$1"
+create_antizapret_preset() {
+  local target_ip mode p added=0
+  while true; do
+    header
+    echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
+    echo "Порты preset: ${DEFAULT_PORTS[*]}"
+    echo "80 и 443 не добавляются по умолчанию."
+    echo
+    target_ip="$(read_nav "IP AntiZapret VPN сервера назначения: ")"
+    is_nav_back "$target_ip" && return 0
+    is_nav_main "$target_ip" && return 10
+    if valid_ip "$target_ip"; then break; fi
+    warn "Неверный IP."
+    pause
+  done
 
-  if [[ ! -s "$STATE_FILE" ]]; then
-    echo "Удалять нечего — правил нет."
-    return 0
+  while true; do
+    header
+    echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
+    echo "1) Рекомендуемый режим: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP"
+    echo "2) Все preset-порты TCP+UDP"
+    echo "3) Все preset-порты только UDP"
+    echo "4) Все preset-порты только TCP"
+    echo "0) Назад"
+    echo "00) Главное меню"
+    echo
+    mode="$(read_nav "Ваш выбор: ")"
+    is_nav_back "$mode" && return 0
+    is_nav_main "$mode" && return 10
+    case "$mode" in
+      1)
+        for p in "${ANTIZAPRET_OPENVPN_PORTS[@]}"; do
+          add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        for p in "${ANTIZAPRET_WG_PORTS[@]}"; do
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        break
+        ;;
+      2)
+        for p in "${DEFAULT_PORTS[@]}"; do
+          add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        break
+        ;;
+      3)
+        for p in "${DEFAULT_PORTS[@]}"; do
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        break
+        ;;
+      4)
+        for p in "${DEFAULT_PORTS[@]}"; do
+          add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        break
+        ;;
+      *) warn "Неверный выбор."; pause ;;
+    esac
+  done
+
+  if [[ "$added" -eq 1 ]]; then
+    apply_rules
+    ok "Preset AntizapretVPN применён."
+  else
+    warn "Ничего не добавлено. Возможно, все правила уже были."
   fi
+  pause
+}
 
-  echo
+delete_selected_rules() {
+  local nums filtered="" n tmp
+  header
   print_rules
+  [[ -s "$STATE_FILE" ]] || { pause; return 0; }
   echo
-  echo "0) Назад"
-  read -r -p "Введите номер правила для удаления (можно несколько через пробел): " nums
-  [[ "$nums" == "0" ]] && return 0
-  [[ -z "${nums// }" ]] && { echo "Номера не указаны."; return 0; }
-
-  local filtered=""
+  nums="$(read_nav "Номера для удаления через пробел: ")"
+  is_nav_back "$nums" && return 0
+  is_nav_main "$nums" && return 10
   for n in $nums; do
     if [[ "$n" =~ ^[0-9]+$ ]]; then
       filtered="$filtered $n"
     else
-      echo "Пропускаю некорректный номер: $n"
+      warn "Пропускаю некорректный номер: $n"
     fi
   done
-  filtered="${filtered# }"
-  [[ -z "${filtered// }" ]] && { echo "Нет валидных номеров."; return 0; }
+  filtered="$(trim "$filtered")"
+  [[ -z "$filtered" ]] && { warn "Нет валидных номеров."; pause; return 0; }
 
-  local tmp
   tmp="$(mktemp)"
-  cp "$STATE_FILE" "$tmp"
-
   awk -v nums="$filtered" '
-    BEGIN{
-      split(nums,a," ");
-      for(i in a) del[a[i]]=1
-    }
-    { if(!del[NR]) print $0 }
-  ' "$tmp" > "$STATE_FILE"
-
+    BEGIN{split(nums,a," "); for(i in a) del[a[i]]=1}
+    {if(!del[NR]) print $0}
+  ' "$STATE_FILE" > "$tmp"
+  cat "$tmp" > "$STATE_FILE"
   rm -f "$tmp"
-
-  apply_rules "$WAN_IF"
-  echo "Удаление выполнено."
+  apply_rules
+  ok "Удаление выполнено."
+  pause
 }
 
-main_menu() {
-  require_root
-  ensure_prereqs
-  init_state
-
-  local WAN_IF
-  WAN_IF="$(detect_wan_if)"
-
-  echo "Интерфейс (WAN): $WAN_IF"
-  echo "Файл правил: $STATE_FILE"
+delete_all_rules() {
+  local ans
+  header
+  warn "Это удалит все правила, которыми управляет $APP_NAME. Другие правила iptables не трогаются."
   echo
+  ans="$(read_nav "Введите YES для подтверждения: ")"
+  is_nav_back "$ans" && return 0
+  is_nav_main "$ans" && return 10
+  if [[ "$ans" == "YES" ]]; then
+    : > "$STATE_FILE"
+    apply_rules
+    ok "Все управляемые правила удалены."
+  else
+    warn "Отменено."
+  fi
+  pause
+}
 
-  apply_rules "$WAN_IF"
+show_iptables_rules() {
+  header
+  print_rules
+  echo
+  info "WAN interface: ${WAN_IF:-unknown}"
+  info "WAN IPv4     : ${WAN_IP:-unknown}"
+  info "NAT mode     : $NAT_MODE"
+  echo
+  echo "iptables NAT chain:"
+  iptables -w -t nat -S "$CHAIN_NAT" 2>/dev/null || true
+  echo
+  echo "iptables FORWARD chain:"
+  iptables -w -S "$CHAIN_FWD" 2>/dev/null || true
+  pause
+}
 
+check_tcp() {
+  local host="$1" port="$2"
+  if timeout 3 bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then
+    ok "TCP $host:$port доступен"
+  else
+    err "TCP $host:$port не отвечает или закрыт"
+  fi
+}
+
+check_udp() {
+  local host="$1" port="$2"
+  if cmd_exists nc; then
+    if timeout 4 nc -zuv -w2 "$host" "$port" >/tmp/proxy_udp_nc.out 2>&1; then
+      ok "UDP $host:$port: probe отправлен, получен положительный ответ nc"
+    else
+      warn "UDP $host:$port: однозначно проверить нельзя; probe отправлен, ответа нет/непонятен"
+    fi
+  else
+    warn "UDP $host:$port: для проверки нужен nc/netcat. UDP без ответа сервиса нельзя надежно проверить снаружи."
+  fi
+}
+
+check_current_rules() {
+  header
+  normalize_state_file
+  if [[ ! -s "$STATE_FILE" ]]; then
+    warn "Правил нет."
+    pause
+    return 0
+  fi
+  echo "Проверяю доступность целевых IP:порт с этого сервера."
+  echo "Важно: это не полноценная внешняя проверка с интернета."
+  echo
+  while read -r proto sport tip dport; do
+    dport="${dport:-$sport}"
+    case "$proto" in
+      tcp) check_tcp "$tip" "$dport" ;;
+      udp) check_udp "$tip" "$dport" ;;
+    esac
+  done < "$STATE_FILE"
+  pause
+}
+
+check_custom_ports() {
+  local target_ip proto_choice ports_in ports p
   while true; do
-    echo
-    echo "Меню:"
-    echo "1) Добавить"
-    echo "2) Удалить"
-    echo "3) Посмотреть какие есть"
-    echo "0) Выход"
-    read -r -p "Выберите пункт: " c
+    header
+    target_ip="$(read_nav "IP для проверки: ")"
+    is_nav_back "$target_ip" && return 0
+    is_nav_main "$target_ip" && return 10
+    valid_ip "$target_ip" && break
+    warn "Неверный IP."
+    pause
+  done
+  proto_choice="$(choose_protocol)"
+  is_nav_back "$proto_choice" && return 0
+  is_nav_main "$proto_choice" && return 10
+  while true; do
+    header
+    ports_in="$(read_nav "Порты через пробел: ")"
+    is_nav_back "$ports_in" && return 0
+    is_nav_main "$ports_in" && return 10
+    ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
+    [[ -n "${ports// }" ]] && break
+    warn "Нет валидных портов."
+    pause
+  done
+  header
+  for p in $ports; do
+    case "$proto_choice" in
+      tcp) check_tcp "$target_ip" "$p" ;;
+      udp) check_udp "$target_ip" "$p" ;;
+      both) check_tcp "$target_ip" "$p"; check_udp "$target_ip" "$p" ;;
+    esac
+  done
+  pause
+}
 
+ports_check_menu() {
+  local c
+  while true; do
+    header
+    echo "Проверка портов"
+    echo "1) Проверить текущие правила"
+    echo "2) Проверить IP/порты вручную"
+    echo "0) Назад"
+    echo "00) Главное меню"
+    echo
+    c="$(read_nav "Ваш выбор: ")"
+    is_nav_back "$c" && return 0
+    is_nav_main "$c" && return 10
     case "$c" in
-      1) add_rule "$WAN_IF" ;;
-      2) delete_rule "$WAN_IF" ;;
-      3) print_rules ;;
-      0) exit 0 ;;
-      *) echo "Неверный выбор." ;;
+      1) check_current_rules || return 10 ;;
+      2) check_custom_ports || return 10 ;;
+      *) warn "Неверный выбор."; pause ;;
     esac
   done
 }
 
-main_menu
+apply_tuning() {
+  header
+  cat > "$SYSCTL_FILE" <<'EOF_SYSCTL'
+# Proxy UDP manager tuning
+net.ipv4.ip_forward=1
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+net.ipv4.tcp_rmem=16384 131072 67108864
+net.ipv4.tcp_wmem=16384 131072 67108864
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+net.core.netdev_max_backlog=250000
+net.core.netdev_budget=600
+net.core.netdev_budget_usecs=8000
+net.core.somaxconn=4096
+net.ipv4.ip_local_port_range=10000 65535
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.secure_redirects=0
+net.ipv4.conf.default.secure_redirects=0
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.netfilter.nf_conntrack_max=1048576
+net.netfilter.nf_conntrack_udp_timeout=15
+net.netfilter.nf_conntrack_udp_timeout_stream=60
+net.netfilter.nf_conntrack_tcp_timeout_established=7200
+EOF_SYSCTL
+  echo nf_conntrack > /etc/modules-load.d/proxy-udp-nf_conntrack.conf
+  sysctl --system >/dev/null || true
+  ok "Тюнинг записан в $SYSCTL_FILE и применён."
+  echo
+  show_conntrack_status false
+  pause
+}
+
+show_conntrack_status() {
+  local do_header="${1:-true}"
+  [[ "$do_header" == "true" ]] && header
+  echo "Диагностика conntrack:"
+  if [[ -r /proc/sys/net/netfilter/nf_conntrack_count ]]; then
+    echo "nf_conntrack_count: $(cat /proc/sys/net/netfilter/nf_conntrack_count)"
+  else
+    warn "nf_conntrack_count недоступен. Возможно, модуль не загружен."
+  fi
+  if [[ -r /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+    echo "nf_conntrack_max  : $(cat /proc/sys/net/netfilter/nf_conntrack_max)"
+  fi
+  for k in nf_conntrack_udp_timeout nf_conntrack_udp_timeout_stream nf_conntrack_tcp_timeout_established; do
+    if [[ -r "/proc/sys/net/netfilter/$k" ]]; then
+      echo "$k: $(cat "/proc/sys/net/netfilter/$k")"
+    fi
+  done
+  echo
+  if cmd_exists conntrack; then
+    conntrack -S 2>/dev/null || true
+  else
+    warn "conntrack-tools не установлен. Для расширенной статистики: apt-get install -y conntrack"
+  fi
+  [[ "$do_header" == "true" ]] && pause
+}
+
+nat_mode_menu() {
+  local c
+  while true; do
+    header
+    echo "Режим исходящего NAT"
+    echo "Текущий режим: $NAT_MODE"
+    echo
+    echo "1) SNAT на внешний IPv4 сервера — лучше для статического IP"
+    echo "2) MASQUERADE — лучше для динамического IP"
+    echo "0) Назад"
+    echo "00) Главное меню"
+    echo
+    c="$(read_nav "Ваш выбор: ")"
+    is_nav_back "$c" && return 0
+    is_nav_main "$c" && return 10
+    case "$c" in
+      1) NAT_MODE="snat"; save_config; apply_rules; ok "Включён SNAT."; pause ;;
+      2) NAT_MODE="masquerade"; save_config; apply_rules; ok "Включён MASQUERADE."; pause ;;
+      *) warn "Неверный выбор."; pause ;;
+    esac
+  done
+}
+
+settings_menu() {
+  local c
+  while true; do
+    header
+    echo "Настройки и диагностика"
+    echo "1) Применить сетевой тюнинг для высокой нагрузки"
+    echo "2) Показать conntrack-статистику"
+    echo "3) Сменить NAT mode: SNAT/MASQUERADE"
+    echo "0) Назад"
+    echo "00) Главное меню"
+    echo
+    c="$(read_nav "Ваш выбор: ")"
+    is_nav_back "$c" && return 0
+    is_nav_main "$c" && return 10
+    case "$c" in
+      1) apply_tuning || return 10 ;;
+      2) show_conntrack_status true ;;
+      3) nat_mode_menu || return 10 ;;
+      *) warn "Неверный выбор."; pause ;;
+    esac
+  done
+}
+
+install_command() {
+  local dst="/usr/local/sbin/proxy-udp"
+  cp "$0" "$dst"
+  chmod 755 "$dst"
+  cat > /etc/systemd/system/proxy-udp.service <<EOF_UNIT
+[Unit]
+Description=Proxy UDP iptables rules restore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$dst apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+  systemctl daemon-reload
+  systemctl enable proxy-udp.service >/dev/null
+  ok "Установлено: $dst"
+  ok "Автоприменение правил включено: proxy-udp.service"
+}
+
+main_menu() {
+  local c rc
+  require_root
+  ensure_prereqs
+  init_files
+  load_config
+  refresh_net_info
+  apply_rules
+
+  while true; do
+    refresh_net_info
+    header
+    echo -e "${BOLD}Главное меню${RESET}"
+    echo "1) Создать прокси / перенаправление"
+    echo -e "2) ${SOFT_GREEN}AntizapretVPN by GubernievS${RESET} — preset портов без 80/443"
+    echo "3) Удалить выбранные правила"
+    echo "4) Удалить все правила"
+    echo "5) Посмотреть правила"
+    echo "6) Проверка портов"
+    echo "7) Настройки и диагностика высокой нагрузки"
+    echo "8) Установить команду proxy-udp и автоприменение после перезагрузки"
+    echo "0) Выход"
+    echo
+    echo -e "${DIM}WAN: ${WAN_IF:-unknown}, IPv4: ${WAN_IP:-unknown}, NAT: $NAT_MODE${RESET}"
+    echo
+    read -r -p "Ваш выбор: " c
+    c="$(trim "$c")"
+    rc=0
+    case "$c" in
+      1) create_proxy_custom || rc=$? ;;
+      2) create_antizapret_preset || rc=$? ;;
+      3) delete_selected_rules || rc=$? ;;
+      4) delete_all_rules || rc=$? ;;
+      5) show_iptables_rules || rc=$? ;;
+      6) ports_check_menu || rc=$? ;;
+      7) settings_menu || rc=$? ;;
+      8) install_command; pause ;;
+      0) exit 0 ;;
+      *) warn "Неверный выбор."; pause ;;
+    esac
+    # rc=10 означает запрос 00 — просто перерисовать главное меню.
+    [[ "$rc" -eq 10 ]] && continue
+  done
+}
+
+case "${1:-}" in
+  apply)
+    require_root; ensure_prereqs; init_files; load_config; refresh_net_info; apply_rules
+    ;;
+  status)
+    require_root; ensure_prereqs; init_files; load_config; refresh_net_info; print_rules; show_conntrack_status false
+    ;;
+  tune)
+    require_root; ensure_prereqs; init_files; apply_tuning
+    ;;
+  *)
+    main_menu
+    ;;
+esac
