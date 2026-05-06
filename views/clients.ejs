@@ -1,0 +1,493 @@
+<%- include('partials_header', { pageTitle: 'Клиенты', pageSubtitle: 'Создание, импорт, синхронизация и лимиты', activePage: 'clients' }) %>
+<%
+  function flagIcon(code) {
+    const cc = String(code || '').toLowerCase();
+    if (!cc) return '';
+    return '<img class="flag-icon" src="https://flagcdn.com/w20/' + cc + '.png" alt="" loading="lazy">';
+  }
+  function nodeName(node) {
+    const suffix = (node.label_suffix || '').trim();
+    const baseName = node.country_name_ru || node.name;
+    return suffix ? (/^\d+$/.test(suffix) ? `${baseName}-${suffix}` : `${baseName} / ${suffix}`) : baseName;
+  }
+  function daysLeftNumber(ts) {
+    const n = Number(ts || 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const diff = n - Date.now();
+    if (diff <= 0) return 0;
+    return Math.ceil(diff / 86400000);
+  }
+  function daysLeftShort(ts) {
+    const left = daysLeftNumber(ts);
+    return left === null ? '∞' : String(left);
+  }
+  function termShort(client) {
+    const left = daysLeftNumber(client.expiry_time);
+    if (left === null) return '∞';
+    return String(left);
+  }
+  function expiryDateTime(ts) {
+    const n = Number(ts || 0);
+    if (!Number.isFinite(n) || n <= 0) return '∞';
+    return new Date(n).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function gbFromBytes(bytes, digits = 1) {
+    const n = Math.max(0, Number(bytes || 0));
+    const gb = n / 1024 / 1024 / 1024;
+    const maxDigits = gb >= 10 ? 0 : digits;
+    return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: maxDigits }).format(gb);
+  }
+  function nodeLimitText(row) {
+    if (row.enabled === 0) return 'выкл.';
+    const gb = Number(row.traffic_gb || 0);
+    if (!gb) return '∞';
+    return `${gbFromBytes(row.used_bytes)}/${gb} ГБ`;
+  }
+  function nodeRemainingText(row) {
+    const gb = Number(row.traffic_gb || 0);
+    if (!gb || row.enabled === 0) return '∞';
+    return gbFromBytes(row.remaining_bytes) + ' ГБ';
+  }
+%>
+
+<% if (message) { %><div class="alert ok"><%= message %></div><% } %>
+<% if (error) { %><div class="alert err"><%= error %></div><% } %>
+
+<div id="toast" class="toast">Скопировано</div>
+
+<div class="card clients-toolbar">
+  <div class="clients-toolbar-actions">
+    <button type="button" class="btn-main" onclick="openModalById('createClientModal')">Создать клиента</button>
+    <button type="button" class="btn-secondary" onclick="openModalById('importSyncModal')">Импорт и синхронизация</button>
+    <button type="button" class="btn-secondary" onclick="openModalById('applyAllModal')">Применить ко всем</button>
+  </div>
+  <form method="get" action="/clients" class="search-form compact-search">
+    <input name="q" value="<%= q || '' %>" placeholder="Поиск: логин, имя, UUID или комментарий" />
+    <button type="submit" class="secondary">Найти</button>
+    <% if (q) { %><a class="link-btn secondary" href="/clients">Сбросить</a><% } %>
+  </form>
+</div>
+
+<div class="card clients-card">
+  <div class="section-title-row">
+    <h2>Все клиенты</h2>
+    <span class="count-chip"><%= clients.length %></span>
+  </div>
+
+  <form method="post" action="/clients/bulk-delete" class="bulk-delete-form js-long-action" data-loading-title="Удаляю клиентов" data-loading-text="Удаление может занять время, если выбран режим удаления с узлов." onsubmit="return confirm('Удалить выбранных клиентов?')">
+    <div class="bulk-row compact-bulk-row">
+      <div>
+        <label>Режим удаления выбранных</label>
+        <select name="delete_mode">
+          <option value="aggregator">Только из агрегатора</option>
+          <option value="secondary">Из агрегатора и вторичных узлов</option>
+          <option value="all">Из агрегатора и всех узлов</option>
+        </select>
+      </div>
+      <button class="danger" type="submit">Удалить выбранных</button>
+    </div>
+
+    <div class="table-wrap clients-table-wrap">
+      <table class="clients-table">
+        <thead>
+          <tr>
+            <th class="check-col"><input class="inline" type="checkbox" onclick="toggleAllClients(this)" /></th>
+            <th>ID</th>
+            <th>Имя</th>
+            <th>Логин</th>
+            <th>Комментарий</th>
+            <th>Лимит</th>
+            <th>Статус</th>
+            <% if (showSubLinks) { %><th class="link-col">SUB</th><% } %>
+            <th class="link-col">JSON</th>
+            <% if (showHappLinks) { %><th class="link-col">HAPP</th><% } %>
+            <th class="actions-col">Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+        <% clients.forEach(client => {
+          const subUrl = `${baseUrl}/sub/${client.sub_slug}`;
+          const jsonUrl = `${baseUrl}/json/${client.sub_slug}`;
+          const happUrl = `${baseUrl}/happ/${client.sub_slug}`;
+          const clientEnabled = client.enabled !== 0;
+          const nodeLimitRows = (client.node_limits || []).filter(nl => nl.client_node_id && ((nl.traffic_gb && nl.traffic_gb > 0) || nl.enabled === 0));
+          const hasNodeLimits = nodeLimitRows.length > 0;
+        %>
+          <tr>
+            <td class="check-col" data-label="Выбрать">
+              <label class="select-client" title="Выбрать клиента">
+                <input class="inline client-check" type="checkbox" name="client_ids" value="<%= client.id %>" />
+                <span></span>
+              </label>
+            </td>
+            <td data-label="ID"><%= client.id %></td>
+            <td data-label="Имя"><%= client.display_name %></td>
+            <td data-label="Логин"><strong><%= client.login %></strong></td>
+            <td data-label="Комментарий" class="comment-cell"><%= client.comment || '-' %></td>
+            <td data-label="Лимит" class="limit-cell">
+              <div class="limit-compact">
+                <span class="limit-pill" title="Общий лимит трафика"><span class="limit-label">ГБ</span><strong><% if (client.traffic_gb && client.traffic_gb > 0) { %><%= client.traffic_gb %><% } else { %>∞<% } %></strong></span>
+                <span class="limit-pill" title="Осталось дней"><span class="limit-label">Дн.</span><strong><%= termShort(client) %></strong></span>
+              </div>
+              <small class="limit-deadline">до: <%= expiryDateTime(client.expiry_time) %></small>
+              <% if (hasNodeLimits) { %>
+                <div class="node-limits compact-node-limits">
+                  <% nodeLimitRows.slice(0, 3).forEach(nl => {
+                    const title = nodeName(nl);
+                  %>
+                    <button type="button" class="node-limit-row <%= nl.enabled === 0 ? 'disabled' : '' %>" onclick="openLimitDetails(<%= client.id %>)" title="Открыть лимиты узлов">
+                      <span class="node-limit-name"><%= title %></span>
+                      <strong class="node-limit-value"><%= nodeLimitText(nl) %></strong>
+                    </button>
+                  <% }) %>
+                  <% if (nodeLimitRows.length > 3) { %>
+                    <button type="button" class="limit-detail-btn" onclick="openLimitDetails(<%= client.id %>)">Ещё <%= nodeLimitRows.length - 3 %></button>
+                  <% } %>
+                </div>
+              <% } %>
+            </td>
+            <td data-label="Статус"><span class="badge <%= clientEnabled ? 'online' : 'offline' %>"><%= clientEnabled ? 'Включён' : 'Отключён' %></span></td>
+            <% if (showSubLinks) { %>
+            <td data-label="SUB" class="link-col">
+              <div class="btn-row">
+                <button type="button" class="btn-main" onclick="copySubLink('<%= subUrl %>', this)">Скопировать SUB</button>
+                <button type="button" class="btn-qr" onclick="showQr('<%= subUrl %>', '<%= client.login %> · SUB')">QR</button>
+              </div>
+            </td>
+            <% } %>
+            <td data-label="JSON" class="link-col">
+              <div class="btn-row">
+                <button type="button" class="btn-main" onclick="copySubLink('<%= jsonUrl %>', this)">Скопировать JSON</button>
+                <button type="button" class="btn-qr" onclick="showQr('<%= jsonUrl %>', '<%= client.login %> · JSON')">QR</button>
+              </div>
+            </td>
+            <% if (showHappLinks) { %>
+            <td data-label="HAPP" class="link-col">
+              <div class="btn-row">
+                <button type="button" class="btn-main" onclick="copySubLink('<%= happUrl %>', this)">Скопировать HAPP</button>
+                <button type="button" class="btn-qr" onclick="showQr('<%= happUrl %>', '<%= client.login %> · HAPP')">QR</button>
+              </div>
+            </td>
+            <% } %>
+            <td data-label="Действия" class="actions-col">
+              <div class="actions-stack">
+                <a class="btn-main" href="/open/<%= client.sub_slug %>" target="_blank">Открыть</a>
+                <button type="button" class="btn-secondary" onclick="openClientEditor(<%= client.id %>)">Редактор</button>
+              </div>
+            </td>
+          </tr>
+        <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </form>
+</div>
+
+<div id="createClientModal" class="modal hidden" onclick="closeModalById(event, 'createClientModal')">
+  <div class="modal-card editor-modal" onclick="event.stopPropagation()">
+    <button type="button" class="modal-close" onclick="hideModalById('createClientModal')">×</button>
+    <h2>Создать клиента</h2>
+    <form method="post" action="/clients" class="js-long-action" data-loading-title="Создаю клиента" data-loading-text="Клиент создаётся на выбранных узлах. Это может занять время.">
+      <div class="form-grid clean-form">
+        <div class="field half">
+          <label>Логин</label>
+          <input name="login" placeholder="<%= nextLogin || 'user001' %>" />
+          <small class="hint">Пусто = автоматический логин. Перед созданием агрегатор проверит выбранные узлы и пропустит занятые имена без учёта регистра: user005 = User005.</small>
+        </div>
+        <div class="field half">
+          <label>Комментарий</label>
+          <input name="comment" placeholder="Имя клиента, телефон, заметка" />
+        </div>
+        <div class="field third">
+          <label>Срок в днях</label>
+          <input name="duration_days" type="number" min="0" value="30" />
+          <small class="hint">0 = без срока.</small>
+        </div>
+        <div class="field third">
+          <label>Общий лимит, ГБ</label>
+          <input name="traffic_gb" type="number" min="0" step="1" value="0" />
+          <small class="hint">0 = без лимита.</small>
+        </div>
+        <div class="field third">
+          <label>Лимит IP</label>
+          <input name="limit_ip" type="number" min="0" value="1" required />
+          <small class="hint">0 = без лимита IP.</small>
+        </div>
+      </div>
+
+      <div class="nodes-head">
+        <div>
+          <label>Узлы клиента</label>
+          <small class="hint">Поле ГБ возле узла задаёт лимит только для этого региона.</small>
+        </div>
+        <label class="select-all-box">
+          <input type="checkbox" id="selectAllNodes" />
+          <span>Выбрать все</span>
+        </label>
+      </div>
+
+      <div class="checkbox-list node-list">
+        <% nodes.forEach(node => { %>
+          <label class="node-item">
+            <input class="node-check" type="checkbox" name="node_ids" value="<%= node.id %>" />
+            <span class="node-info">
+              <strong><%- flagIcon(node.country_code) %> <%= nodeName(node) %></strong>
+              <small>inbound <%= node.inbound_id %></small>
+            </span>
+            <input class="node-gb-input" name="node_traffic_gb_<%= node.id %>" type="number" min="0" step="1" placeholder="ГБ" />
+          </label>
+        <% }) %>
+      </div>
+
+      <div class="modal-actions">
+        <button type="submit" class="btn-main">Создать клиента</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="importSyncModal" class="modal hidden" onclick="closeModalById(event, 'importSyncModal')">
+  <div class="modal-card editor-modal" onclick="event.stopPropagation()">
+    <button type="button" class="modal-close" onclick="hideModalById('importSyncModal')">×</button>
+    <h2>Импорт и синхронизация</h2>
+
+    <div class="modal-section-box">
+      <h3>Импорт из основной 3x-ui</h3>
+      <p class="muted">Берёт клиентов из выбранного узла и переносит в агрегатор: UUID, subId, flow, дату, ГБ, IP, статус и комментарий. После этого создаёт/обновляет клиентов на активных узлах.</p>
+      <form method="post" action="/clients/import" class="js-long-action" data-loading-title="Идёт импорт" data-loading-text="Клиенты импортируются из выбранного 3x-ui и создаются на узлах. Это может занять время.">
+        <label>Основной узел-источник</label>
+        <select name="node_id" required>
+          <% nodes.forEach(node => { %>
+            <option value="<%= node.id %>"><%= nodeName(node) %> (inbound <%= node.inbound_id %>)</option>
+          <% }) %>
+        </select>
+        <button type="submit" class="btn-main">Импортировать клиентов</button>
+      </form>
+    </div>
+
+    <div class="modal-section-box">
+      <h3>Обновить клиентов узлов</h3>
+      <p class="muted">Без выбора сервера. Берёт клиентов из агрегатора и создаёт/обновляет их на всех активных узлах. Полезно после добавления нового узла.</p>
+      <form method="post" action="/clients/sync-nodes" class="js-long-action" data-loading-title="Идёт синхронизация" data-loading-text="Агрегатор создаёт и обновляет клиентов на активных узлах. Не закрывайте страницу.">
+        <button type="submit" class="btn-secondary">Обновить клиентов узлов</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div id="applyAllModal" class="modal hidden" onclick="closeModalById(event, 'applyAllModal')">
+  <div class="modal-card editor-modal" onclick="event.stopPropagation()">
+    <button type="button" class="modal-close" onclick="hideModalById('applyAllModal')">×</button>
+    <h2>Применить ко всем</h2>
+    <p class="muted">Изменения применяются только к выбранному узлу. Пустое поле = не менять. 0 = безлимит. Потраченный трафик не сбрасывается.</p>
+    <form method="post" action="/clients/apply-to-node" class="js-long-action" data-loading-title="Применяю настройки" data-loading-text="Настройки применяются ко всем клиентам выбранного узла. Это может занять время.">
+      <div class="form-grid clean-form">
+        <div class="field">
+          <label>Узел</label>
+          <select name="node_id" required>
+            <% nodes.forEach(node => { %>
+              <option value="<%= node.id %>"><%= nodeName(node) %> (inbound <%= node.inbound_id %>)</option>
+            <% }) %>
+          </select>
+        </div>
+        <div class="field half">
+          <label>Лимит IP</label>
+          <input name="limit_ip" type="number" min="0" placeholder="не менять" />
+        </div>
+        <div class="field half">
+          <label>Лимит ГБ</label>
+          <input name="traffic_gb" type="number" min="0" step="1" placeholder="не менять" />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn-main">Применить</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card danger-zone-card">
+  <h2>Массовое удаление</h2>
+  <form method="post" action="/clients/delete-all" class="js-long-action" data-loading-title="Удаляю всех клиентов" data-loading-text="Удаление может занять время." onsubmit="return confirm('Удалить всех клиентов выбранным способом?')">
+    <label>Режим удаления</label>
+    <select name="delete_mode">
+      <option value="aggregator">Только из агрегатора</option>
+      <option value="secondary">Из агрегатора и вторичных узлов</option>
+      <option value="all">Из агрегатора и всех узлов</option>
+    </select>
+    <button class="danger" type="submit">Удалить всех клиентов</button>
+  </form>
+</div>
+
+<% clients.forEach(client => {
+  const clientEnabled = client.enabled !== 0;
+%>
+  <div id="clientEditor-<%= client.id %>" class="modal hidden" onclick="closeClientEditor(event, <%= client.id %>)">
+    <div class="modal-card editor-modal" onclick="event.stopPropagation()">
+      <button type="button" class="modal-close" onclick="hideClientEditor(<%= client.id %>)">×</button>
+      <h2>Редактор клиента</h2>
+      <p class="muted"><code><%= client.uuid %></code></p>
+
+      <form method="post" action="/clients/<%= client.id %>/edit" class="js-long-action" data-loading-title="Сохраняю клиента" data-loading-text="Изменения применяются на узлах клиента. Это может занять время.">
+        <input type="hidden" name="back" value="/clients" />
+        <div class="form-grid clean-form">
+          <div class="field half">
+            <label>Имя клиента</label>
+            <input name="display_name" value="<%= client.display_name %>" required />
+          </div>
+          <div class="field half">
+            <label>Логин / Email</label>
+            <input name="login" value="<%= client.login %>" required />
+          </div>
+          <div class="field half">
+            <label>Комментарий</label>
+            <input name="comment" value="<%= client.comment || '' %>" placeholder="Заметка для поиска" />
+          </div>
+          <div class="field half">
+            <label>Лимит IP</label>
+            <input name="limit_ip" type="number" min="0" value="<%= client.limit_ip ?? 1 %>" />
+          </div>
+          <div class="field half">
+            <label>Новый срок в днях</label>
+            <input name="duration_days" type="number" min="0" value="" placeholder="не менять" />
+            <small class="hint">Сейчас осталось: <%= termShort(client) %> дн., до <%= expiryDateTime(client.expiry_time) %>. Пусто = не менять, 0 = убрать срок.</small>
+          </div>
+          <div class="field half">
+            <label>Общий лимит трафика, ГБ</label>
+            <input name="traffic_gb" type="number" min="0" step="1" value="<%= client.traffic_gb || 0 %>" />
+          </div>
+        </div>
+
+        <h3>Узлы клиента</h3>
+        <p class="muted">Снимите галочку, чтобы отключить клиенту конкретный узел. Поле ГБ задаёт лимит только для этого региона; пусто = общий лимит.</p>
+        <div class="checkbox-list node-list">
+          <% client.node_limits.forEach(row => {
+            const nodeLabel = [row.country_flag, nodeName(row)].filter(Boolean).join(' ');
+          %>
+            <label class="node-item node-edit-row">
+              <input class="inline" type="checkbox" name="node_enabled_<%= row.node_id %>" value="1" <%= row.client_node_id && row.enabled !== 0 ? 'checked' : '' %> />
+              <span class="node-info"><strong><%= nodeLabel %></strong><small><%= row.client_node_id ? (row.enabled !== 0 ? 'узел включён' : 'узел отключён для клиента') : 'узел не назначен' %></small></span>
+              <input class="node-gb-input" name="node_traffic_gb_<%= row.node_id %>" type="number" min="0" step="1" value="<%= row.traffic_gb || '' %>" placeholder="ГБ" />
+            </label>
+          <% }) %>
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="btn-main">Сохранить</button>
+        </div>
+      </form>
+
+      <hr class="soft-sep" />
+
+      <form method="post" action="/clients/<%= client.id %>/extend" class="extend-form js-long-action" data-loading-title="Продлеваю клиента" data-loading-text="Срок продлевается на узлах клиента.">
+        <input type="hidden" name="back" value="/clients" />
+        <label>Продлить срок</label>
+        <div class="btn-row stretch-row">
+          <input name="days" type="number" min="1" value="30" />
+          <button type="submit" class="btn-main">Продлить на дней</button>
+        </div>
+      </form>
+
+      <form method="post" action="/clients/<%= client.id %>/toggle" class="modal-actions js-long-action" data-loading-title="Меняю статус" data-loading-text="Статус клиента применяется на узлах.">
+        <input type="hidden" name="back" value="/clients" />
+        <button type="submit" class="<%= clientEnabled ? 'btn-danger' : 'btn-secondary' %>"><%= clientEnabled ? 'Отключить клиента' : 'Включить клиента' %></button>
+      </form>
+    </div>
+  </div>
+<% }) %>
+
+<% clients.forEach(client => { %>
+  <% const details = (client.node_limits || []).filter(nl => nl.client_node_id && ((nl.traffic_gb && nl.traffic_gb > 0) || nl.enabled === 0)); %>
+  <% if (details.length) { %>
+    <div id="limitDetails-<%= client.id %>" class="modal hidden" onclick="closeLimitDetails(event, <%= client.id %>)">
+      <div class="modal-card limit-details-card" onclick="event.stopPropagation()">
+        <button type="button" class="modal-close" onclick="hideLimitDetails(<%= client.id %>)">×</button>
+        <h2>Лимиты узлов</h2>
+        <p class="muted"><%= client.login %></p>
+        <div class="limit-details-list">
+          <% details.forEach(nl => { %>
+            <div class="limit-details-row <%= nl.enabled === 0 ? 'disabled' : '' %>">
+              <span><%= nodeName(nl) %></span>
+              <strong><%= nodeLimitText(nl) %></strong>
+              <% if (nl.enabled !== 0 && nl.traffic_gb > 0) { %><small>осталось <%= nodeRemainingText(nl) %></small><% } %>
+            </div>
+          <% }) %>
+        </div>
+      </div>
+    </div>
+  <% } %>
+<% }) %>
+
+<div id="loadingModal" class="modal hidden loading-modal" aria-live="polite">
+  <div class="modal-card loading-card">
+    <div class="loader-ring"></div>
+    <h2 id="loadingTitle">Загрузка</h2>
+    <p class="muted" id="loadingText">Операция выполняется. Не закрывайте страницу.</p>
+  </div>
+</div>
+
+<div id="qrModal" class="modal hidden" onclick="hideQr(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeQr()">×</button>
+    <h2 id="qrTitle">QR</h2>
+    <img id="qrImg" alt="QR" />
+    <p class="muted" id="qrText"></p>
+  </div>
+</div>
+
+<script>
+function showToast(text) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = text || 'Скопировано';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1300);
+}
+function copySubLink(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    if (btn) {
+      const old = btn.textContent;
+      btn.textContent = 'Скопировано';
+      setTimeout(() => btn.textContent = old, 1200);
+    }
+    showToast('Ссылка скопирована');
+  }).catch(() => showToast('Не удалось скопировать'));
+}
+function toggleAllClients(source) { document.querySelectorAll('.client-check').forEach(cb => cb.checked = source.checked); }
+function showQr(text, title) {
+  document.getElementById('qrTitle').textContent = title || 'QR';
+  document.getElementById('qrText').textContent = text;
+  document.getElementById('qrImg').src = '/qr?text=' + encodeURIComponent(text);
+  document.getElementById('qrModal').classList.remove('hidden');
+}
+function closeQr() { document.getElementById('qrModal').classList.add('hidden'); }
+function hideQr(e) { if (e.target.id === 'qrModal') closeQr(); }
+function openModalById(id) { document.getElementById(id)?.classList.remove('hidden'); }
+function hideModalById(id) { document.getElementById(id)?.classList.add('hidden'); }
+function closeModalById(e, id) { if (e.target.id === id) hideModalById(id); }
+function openClientEditor(id) { document.getElementById('clientEditor-' + id).classList.remove('hidden'); }
+function hideClientEditor(id) { document.getElementById('clientEditor-' + id).classList.add('hidden'); }
+function closeClientEditor(e, id) { if (e.target.id === 'clientEditor-' + id) hideClientEditor(id); }
+function openLimitDetails(id) { document.getElementById('limitDetails-' + id)?.classList.remove('hidden'); }
+function hideLimitDetails(id) { document.getElementById('limitDetails-' + id)?.classList.add('hidden'); }
+function closeLimitDetails(e, id) { if (e.target.id === 'limitDetails-' + id) hideLimitDetails(id); }
+function showLoading(title, text) {
+  const modal = document.getElementById('loadingModal');
+  if (!modal) return;
+  document.getElementById('loadingTitle').textContent = title || 'Загрузка';
+  document.getElementById('loadingText').textContent = text || 'Операция выполняется. Не закрывайте страницу.';
+  modal.classList.remove('hidden');
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('form.js-long-action').forEach(form => {
+    form.addEventListener('submit', () => showLoading(form.dataset.loadingTitle, form.dataset.loadingText));
+  });
+  const selectAll = document.getElementById('selectAllNodes');
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      document.querySelectorAll('.node-check').forEach(cb => cb.checked = selectAll.checked);
+    });
+  }
+});
+</script>
+
+<%- include('partials_footer') %>

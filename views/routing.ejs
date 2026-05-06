@@ -1,0 +1,183 @@
+<%- include('partials_header', { pageTitle: 'Маршрутизация', pageSubtitle: 'Параметры для JSON: какие сайты и IP отправлять через proxy, всё остальное напрямую', activePage: 'routing' }) %>
+
+<% if (message) { %><div class="alert ok"><%= message %></div><% } %>
+<% if (error) { %><div class="alert err"><%= error %></div><% } %>
+
+<div class="grid">
+  <section class="card span-6">
+    <h2>Параметры для JSON</h2>
+    <p class="muted">Эти настройки применяются к ссылкам <code>/json/:slug</code>. Старую ссылку клиенту пересылать не нужно: после сохранения клиент получит новые правила при обновлении JSON-профиля.</p>
+
+    <form method="post" action="/routing" class="routing-form">
+      <label class="switch-row">
+        <input type="checkbox" name="routing_enabled" value="1" <%= routingEnabled ? 'checked' : '' %> />
+        <span><strong>Использовать маршрутизацию</strong><small>Если выключить, JSON будет без proxy-правил и почти всё пойдёт напрямую.</small></span>
+      </label>
+
+      <label class="switch-row">
+        <input type="checkbox" name="routing_all_nodes" value="1" <%= routingAllNodes ? 'checked' : '' %> onchange="document.getElementById('excluded-routing-nodes').style.display = this.checked ? 'none' : 'block'" />
+        <span><strong>Маршруты на всех узлах</strong><small>Если снять галочку, можно выбрать узлы, где JSON будет без routing: весь трафик пойдёт через выбранный VPN-сервер. Узел останется в подписке вместе с остальными.</small></span>
+      </label>
+
+      <div id="excluded-routing-nodes" style="display:<%= routingAllNodes ? 'none' : 'block' %>; margin:12px 0 18px;">
+        <h3>Узлы без маршрутизации</h3>
+        <p class="hint">Отметь серверы, для которых не нужно применять маршруты. Например, РФ/RU сервер: он будет показываться в подписке, но при подключении к нему весь трафик пойдёт через него.</p>
+        <div class="preset-grid">
+          <% nodes.forEach(n => { %>
+            <label class="preset-card">
+              <input type="checkbox" name="routing_excluded_node_ids" value="<%= n.id %>" <%= routingExcludedNodeIds.map(Number).includes(Number(n.id)) ? 'checked' : '' %> />
+              <span><strong><%= n.country_flag || '' %> <%= n.country_name_ru || n.name %></strong><small><%= n.label_suffix || ('inbound ' + n.inbound_id) %></small></span>
+            </label>
+          <% }) %>
+        </div>
+      </div>
+
+      <h3>Режим</h3>
+      <div class="mode-grid">
+        <label class="preset-card"><input type="radio" name="routing_mode" value="proxy-selected" <%= routingMode !== 'proxy-except' ? 'checked' : '' %> /><span><strong>Через proxy только выбранное</strong><small>Как сейчас: готовые сервисы и дополнительные списки.</small></span></label>
+        <label class="preset-card"><input type="radio" name="routing_mode" value="proxy-except" <%= routingMode === 'proxy-except' ? 'checked' : '' %> /><span><strong>Всё через proxy, кроме...</strong><small>Исключения идут напрямую, остальной TCP/UDP трафик — в proxy.</small></span></label>
+      </div>
+
+      <h3>Готовые сервисы</h3>
+      <p class="hint">Выбери нужные сервисы. Система сама добавит правильные <code>geosite</code> и доступные <code>geoip</code>.</p>
+      <div class="preset-grid">
+        <% routingPresets.forEach(p => { %>
+          <label class="preset-card">
+            <input type="checkbox" name="presets" value="<%= p.key %>" <%= selectedPresets.includes(p.key) ? 'checked' : '' %> />
+            <span><strong><%= p.label %></strong><small><%= p.domains.concat(p.ips).join(', ') %></small></span>
+          </label>
+        <% }) %>
+      </div>
+
+      <div class="form-grid" style="margin-top:16px;">
+        <div class="field half">
+          <label>Дополнительные domain / geosite</label>
+          <textarea name="custom_domains" rows="10" placeholder="geosite:youtube&#10;domain:example.com&#10;regexp:.*\\.example\\.com$"><%= customDomainsText %></textarea>
+          <small class="hint">Можно писать через новую строку, запятую или точку с запятой. Поддерживается: <code>geosite:tag</code>, <code>domain:site.com</code>, <code>regexp:...</code>, <code>keyword:...</code>, <code>full:...</code>.</small>
+        </div>
+
+        <div class="field half">
+          <label>Дополнительные ip / geoip</label>
+          <textarea name="custom_ips" rows="10" placeholder="geoip:telegram&#10;1.2.3.0/24&#10;2001:db8::/32"><%= customIpsText %></textarea>
+          <small class="hint">Поддерживается: <code>geoip:tag</code>, IPv4, IPv4 CIDR, IPv6 и IPv6 CIDR. Например <code>geoip:facebook</code>.</small>
+        </div>
+      </div>
+
+      <h3>Исключения для режима «всё кроме»</h3>
+      <div class="form-grid">
+        <div class="field half"><label>Кроме domain / geosite → direct</label><textarea name="except_domains" rows="7" placeholder="geosite:category-ru&#10;geosite:category-ru&#10;domain:bank.ru"><%= exceptDomainsText %></textarea><small class="hint">Для RU добавь <code>geosite:category-ru</code> или <code>geosite:category-ru</code>, если такой тег есть в твоём geosite.dat.</small></div>
+        <div class="field half"><label>Кроме ip / geoip → direct</label><textarea name="except_ips" rows="7" placeholder="geoip:ru&#10;10.0.0.0/8"><%= exceptIpsText %></textarea><small class="hint">Для российских IP добавь <code>geoip:ru</code>.</small></div>
+      </div>
+
+      <h3>GeoSite / GeoIP источники</h3>
+      <div class="alert ok" style="margin-top:12px;">3x-ui умеет обновлять geofile-источники через свой раздел Xray/Geofiles. Здесь ссылки сохраняются в агрегаторе как источник правды и справочник для узлов. Автоматическая запись прямо в 3x-ui зависит от версии API 3x-ui; если API недоступен, используй эти ссылки вручную в панели 3x-ui.</div>
+      <div class="form-grid">
+        <div class="field half">
+          <label>GeoSite URL</label>
+          <input name="geosite_url" value="<%= geositeUrl || '' %>" placeholder="Необязательно: ссылка на geosite.dat" />
+          <small class="hint">Файл доменных списков geosite.dat.</small>
+        </div>
+        <div class="field half">
+          <label>GeoIP URL</label>
+          <input name="geoip_url" value="<%= geoipUrl || '' %>" placeholder="Необязательно: ссылка на geoip.dat" />
+          <small class="hint">Файл IP-списков geoip.dat.</small>
+        </div>
+      </div>
+      <div class="field">
+        <label>Дополнительные ссылки / заметки</label>
+        <textarea name="geodata_urls" rows="3" placeholder="Необязательно. Можно вставить дополнительные ссылки или заметки."><%= geodataUrlsText %></textarea>
+        <small class="hint">Можно хранить несколько источников. JSON-подписка не скачивает эти файлы сама; они должны быть установлены в Xray/3x-ui или клиенте.</small>
+      </div>
+      <div class="preset-grid dns-preset-grid">
+        <button type="button" class="btn-secondary" onclick="setGeoPreset('loyal')">Loyalsoldier</button>
+        <button type="button" class="btn-secondary" onclick="setGeoPreset('ru')">Russia rules</button>
+        <button type="button" class="btn-secondary" onclick="setGeoPreset('iran')">Iran rules</button>
+      </div>
+
+      <h3>DNS для JSON-подписки</h3>
+      <p class="hint">Эти DNS попадут в генерируемый JSON-конфиг. DoH/DoT можно использовать, если клиентская сборка Xray/Happ их поддерживает.</p>
+      <div class="form-grid">
+        <div class="field half">
+          <label>Готовый набор DNS</label>
+          <select name="dns_preset">
+            <option value="cloudflare-google" <%= dnsPreset === 'cloudflare-google' ? 'selected' : '' %>>Cloudflare + Google</option>
+            <option value="cloudflare" <%= dnsPreset === 'cloudflare' ? 'selected' : '' %>>Cloudflare</option>
+            <option value="google" <%= dnsPreset === 'google' ? 'selected' : '' %>>Google</option>
+            <option value="quad9" <%= dnsPreset === 'quad9' ? 'selected' : '' %>>Quad9</option>
+            <option value="yandex" <%= dnsPreset === 'yandex' ? 'selected' : '' %>>Yandex DNS</option>
+            <option value="doh_cloudflare" <%= dnsPreset === 'doh_cloudflare' ? 'selected' : '' %>>Cloudflare DoH</option>
+            <option value="doh_google" <%= dnsPreset === 'doh_google' ? 'selected' : '' %>>Google DoH</option>
+            <option value="manual" <%= dnsPreset === 'manual' ? 'selected' : '' %>>Только вручную</option>
+          </select>
+        </div>
+        <div class="field half">
+          <label>Ручные DNS / DoH / DoT</label>
+          <textarea name="dns_custom" rows="4" placeholder="1.1.1.1&#10;https://cloudflare-dns.com/dns-query&#10;tls://dns.google"><%= dnsCustomText || '' %></textarea>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit">Сохранить и применить</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card span-6">
+    <h2>Текущий итог</h2>
+    <div class="kv-list">
+      <div class="kv-item">
+        <strong>JSON-ссылка</strong>
+        <div class="muted"><code><%= jsonUrlExample %></code></div>
+      </div>
+      <div class="kv-item">
+        <strong><%= routingMode === 'proxy-except' ? 'Через direct пойдут домены-исключения' : 'Через proxy пойдут домены' %></strong>
+        <% const domainPreview = routingMode === 'proxy-except' ? directDomains : proxyDomains; %>
+        <% if (domainPreview.length) { %>
+          <pre class="routing-preview"><%= domainPreview.join('\n') %></pre>
+        <% } else { %>
+          <div class="muted">Нет доменных правил.</div>
+        <% } %>
+      </div>
+      <div class="kv-item">
+        <strong><%= routingMode === 'proxy-except' ? 'Через direct пойдут IP-исключения' : 'Через proxy пойдут IP' %></strong>
+        <% const ipPreview = routingMode === 'proxy-except' ? directIps : proxyIps; %>
+        <% if (ipPreview.length) { %>
+          <pre class="routing-preview"><%= ipPreview.join('\n') %></pre>
+        <% } else { %>
+          <div class="muted">Нет IP-правил.</div>
+        <% } %>
+      </div>
+
+      <div class="kv-item">
+        <strong>Всё остальное</strong>
+        <div class="muted"><%= routingMode === 'proxy-except' ? 'Идёт через proxy. Исключения выше идут напрямую.' : 'Идёт напрямую через direct.' %></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+function setGeoPreset(kind) {
+  const presets = {
+    loyal: [
+      'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat',
+      'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat'
+    ],
+    ru: [
+      'https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat',
+      'https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat'
+    ],
+    iran: [
+      'https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat',
+      'https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat'
+    ]
+  };
+  const chosen = presets[kind];
+  if (!chosen) return;
+  const geosite = document.querySelector('input[name="geosite_url"]');
+  const geoip = document.querySelector('input[name="geoip_url"]');
+  if (geosite) geosite.value = chosen[0];
+  if (geoip) geoip.value = chosen[1];
+}
+</script>
+<%- include('partials_footer') %>

@@ -1,414 +1,509 @@
-# Proxy UDP
+# 3xui-Aggregator
 
-[English](README.md) | [Русский](README.ru_RU.md)
+Панель для объединения подписок и управления клиентами на нескольких 3x-ui узлах.
 
-`Proxy UDP` is an interactive TCP/UDP forwarding manager for Linux servers.
+## Что есть в проекте
 
-Despite the project name, the script is not limited to UDP. It can create forwarding rules for:
+- отдельная админ-панель;
+- добавление нескольких узлов 3x-ui;
+- проверка доступности узлов;
+- создание клиента сразу на нескольких узлах;
+- единая ссылка подписки;
+- просмотр карточки клиента и повторная выдача подписки;
+- удаление клиента со всех узлов;
+- импорт существующих клиентов с другого сервера 3x-ui;
+- копирование клиентов между узлами;
+- создание подписки для уже существующих клиентов;
+- ручной backup и восстановление из файла;
+- настройки HAPP JSON-подписки и маршрутизации;
+- защита входа в панель логином, паролем, лимитом попыток, IP-фильтром и secret-key ссылкой;
+- раздельные адреса для входа в панель и для клиентских JSON/SUB-подписок;
+- настройка режима ссылок подписок: свой адрес, адрес панели без порта или адрес панели с портом;
+- опциональная привязка Caddy к отдельному IP сервера, если на VPS несколько IP.
 
-- UDP only;
-- TCP only;
-- both TCP and UDP.
+## Быстрая установка одной командой
 
-This repository also includes a separate `mtproto-manager` script. MTProto Manager can be installed and launched independently from `proxy-udp`, without creating a separate repository.
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/dagmagnat/3xui-Aggregator/main/install.sh)
+```
 
----
+Установщик на русском языке:
 
-## What is included in this repository?
+- спросит режим панели: IP, домен на обычном HTTPS 443 или домен с HTTPS на выбранном порту;
+- спросит внутренний порт приложения, по умолчанию `3000` — в обычном доменном режиме он не добавляется в публичную ссылку;
+- спросит публичный адрес подписок JSON/SUB;
+- при доменных режимах предложит привязать порты Caddy к конкретному IP сервера, если это нужно;
+- спросит логин и пароль панели;
+- проверит, свободны ли нужные порты;
+- если обычный доменный режим невозможен из-за занятых `80/443`, предложит переключиться на IP или домен с портом;
+- создаст secret-key для скрытого входа в панель;
+- клонирует проект в `/opt/3xui-aggregator`;
+- запустит контейнеры через Docker Compose.
+
+После установки скрипт покажет адрес входа. Для обычного доменного режима он будет без порта:
 
 ```text
-proxy-udp          # TCP/UDP forwarding manager
-mtproto-manager    # MTProto Proxy Docker manager
-README.md          # English documentation
-README.ru_RU.md    # Russian documentation
+https://panel.example.com/login?key=SECRET_KEY
 ```
 
----
-
-## Quick installation
-
-### Run Proxy UDP
-
-```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)")
-```
-
-Manual installation:
-
-```bash
-wget -O /root/proxy-udp "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)"
-chmod +x /root/proxy-udp
-sudo /root/proxy-udp
-```
-
-### Run MTProto Manager only
-
-```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)")
-```
-
-Manual installation:
-
-```bash
-wget -O /root/mtproto-manager "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)"
-chmod +x /root/mtproto-manager
-sudo /root/mtproto-manager
-```
-
-The `?$(date +%s)` suffix helps bypass possible GitHub Raw cache immediately after updating files in the repository.
-
----
-
-## Fast local commands: `proxy-go` and `mtproto-go`
-
-You do not need to open GitHub and copy the full installation command every time. Install a short local command once, then run the manager with one word.
-
-### Install or update `proxy-go`
-
-```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)") install-go
-```
-
-After that, launch Proxy UDP anytime with:
-
-```bash
-sudo proxy-go
-```
-
-You can also install it from the Proxy UDP menu:
+Для режима `домен + порт` он будет с выбранным портом:
 
 ```text
-8) Install/update proxy-go quick command and auto-apply service
+https://panel.example.com:3000/login?key=SECRET_KEY
 ```
 
-This also creates a systemd service for restoring Proxy UDP rules after reboot:
+Без этого ключа `/login` будет отдавать `404`. Это не заменяет пароль, а просто скрывает страницу входа от случайных посетителей и ботов.
 
-```bash
-sudo systemctl status proxy-go.service
-```
+После успешного входа ключ в адресе больше не нужен: переходы внутри панели работают по обычной авторизованной сессии.
 
-Apply saved forwarding rules manually:
-
-```bash
-sudo proxy-go apply
-```
-
-Show status:
-
-```bash
-sudo proxy-go status
-```
-
-Apply network tuning:
-
-```bash
-sudo proxy-go tune
-```
-
-### Install or update `mtproto-go`
-
-```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)") install-go
-```
-
-After that, launch MTProto Manager anytime with:
-
-```bash
-sudo mtproto-go
-```
-
-You can also install it from the MTProto Manager menu:
+Клиентские ссылки не получают secret-key. Например, если публичный адрес подписок указан как `https://amg.amored.ru`, клиентская JSON-ссылка будет такой:
 
 ```text
-13) Install/update mtproto-go quick command
+https://amg.amored.ru/json/hc6p85yomh2mq4k5
 ```
 
-Useful MTProto quick subcommands:
+
+## Режимы доступа к панели
+
+### 1. По IP
+
+Панель открывается так:
+
+```text
+http://SERVER_IP:3000
+```
+
+Нужен свободный порт панели, например `3000`.
+
+### 2. По домену с обычным HTTPS
+
+Панель открывается так:
+
+```text
+https://panel.example.com
+```
+
+Этот режим использует Caddy и обычный публичный SSL-сертификат. На сервере должны быть свободны порты `80` и `443`. Внутренний порт приложения (`3000`, `3030` и т.д.) используется только внутри Docker/Caddy и не попадает в ссылку панели.
+
+### 3. По домену и порту с HTTPS
+
+Панель открывается так:
+
+```text
+https://panel.example.com:3000
+```
+
+Этот режим использует Caddy на выбранном порту. Если для этого же домена также включён публичный адрес подписок без порта на `443`, Caddy использует обычный публичный SSL-сертификат и для `443`, и для порта панели.
+
+Если используется только домен + порт без обычного `443` для этого же домена, Caddy применит локальный сертификат `tls internal`. Тогда браузер может показать предупреждение о недоверенном сертификате.
+
+Такой режим полезен, если не хочется держать вход в админку на стандартном `443`, но нужен HTTPS и отдельный порт.
+
+При установке можно отдельно указать публичный адрес подписок без порта, например:
+
+```text
+Панель:    https://panel.example.com:3000/login?key=SECRET_KEY
+Подписка: https://panel.example.com/json/<slug>
+```
+
+В этом варианте Caddy будет слушать и выбранный порт панели, и обычный `443` для публичных подписок. Важно: для одного и того же домена нельзя одновременно использовать публичный сертификат на `443` и `tls internal` на порту панели. Установщик учитывает это и на порту панели использует тот же публичный сертификат.
+
+Если `80/443` заняты, ссылки без порта на этом же сервере не заработают без внешнего reverse proxy, отдельного IP или отдельного сервера.
+
+
+
+## Важное про порт при установке
+
+В режиме «по домену, обычный HTTPS 443» установщик может спросить внутренний порт приложения. Это не публичный порт панели. Снаружи панель всё равно открывается так:
+
+```text
+https://panel.example.com/login?key=SECRET_KEY
+```
+
+А не так:
+
+```text
+https://panel.example.com:3030/login?key=SECRET_KEY
+```
+
+Порт в публичной ссылке появляется только в режиме «домен + порт». Если нужен вход через порт, выбирай этот режим отдельно. Если нужны клиентские JSON-ссылки без порта, укажи публичный адрес подписок без порта, например `https://panel.example.com`.
+
+В установщике исправлена генерация Caddyfile: HTTP-редиректы теперь явно разделяют админские страницы и публичные подписки, чтобы Caddy не перебрасывал `/json` или обычный HTTPS на неправильный порт.
+
+## Адрес панели и адрес подписок
+
+В настройках панели есть отдельный блок «Адреса панели и подписок».
+
+Там можно изменить:
+
+- адрес входа в панель, например `https://amg.amored.ru:3001`;
+- secret-key входа;
+- публичный адрес подписок, например `https://amg.amored.ru`;
+- режим ссылок подписок: свой адрес, адрес панели без порта или адрес панели как есть, включая порт.
+
+В этом же разделе показывается итог: какая ссылка используется для входа, какая JSON-ссылка будет копироваться клиенту и какая SUB-ссылка будет доступна, если SUB включён в списке клиентов.
+
+Для сценария «админка с портом, клиентские JSON без порта» обычно нужно:
+
+```text
+Адрес входа в панель: https://amg.amored.ru:3001
+Публичный адрес подписок: https://amg.amored.ru
+Режим ссылок подписок: Свой публичный адрес подписок
+```
+
+Тогда кнопки копирования и QR в панели будут выдавать клиентам ссылки без порта и без ключа. Если позже понадобится выдавать ссылки с портом, в настройках достаточно переключить режим на «Адрес панели как есть, включая порт» или указать свой публичный адрес с портом.
+
+## Настройки сервера в веб-панели
+
+В `Настройки` есть блок «Сервер и обслуживание». Там показываются:
+
+- текущий порт приложения;
+- IP, к которому привязаны порты Caddy, если он задан;
+- готовые команды `agg`, просмотра логов и удаления;
+- итоговые ссылки, которые сейчас будут использоваться для входа и для JSON/SUB.
+
+Порт, режим установки и полное удаление не запускаются прямо из веб-панели специально. Для этого нужен доступ к Docker и файловой системе сервера, а выдавать контейнеру такие права небезопасно. Эти действия выполняются через `agg` на сервере.
+
+## Дополнительная защита панели
+
+В проекте уже есть несколько уровней защиты:
+
+- secret-key в ссылке входа;
+- логин и пароль администратора;
+- лимит попыток входа;
+- привязка активной сессии к IP;
+- список разрешённых IP в настройках панели;
+- secure cookie в доменных HTTPS-режимах.
+
+Рекомендуется после установки зайти в `Настройки` и добавить свой IP в список разрешённых IP, если IP у тебя статический.
+
+## Можно ли ставить на тот же сервер, где уже есть 3x-ui
+
+Да, можно.
+
+Важные условия:
+
+- для режима по IP нужен свободный порт панели, например `3000`;
+- для режима `домен + порт` нужен свободный выбранный порт;
+- если в режиме `домен + порт` подписки должны быть без порта, также должны быть свободны `80` и `443` на IP, где работает агрегатор;
+- для обычного доменного режима должны быть свободны `80` и `443`;
+- если `80/443` уже заняты другим сервисом, обычный доменный режим не будет запущен, чтобы не мешать 3x-ui или другой панели;
+- в такой ситуации установщик предложит продолжить по IP или переключиться на режим `домен + порт`.
+
+Если на одном VPS несколько IP, при установке можно указать IP агрегатора для привязки портов. Тогда Docker опубликует Caddy, например, как `2.2.2.2:80`, `2.2.2.2:443` и `2.2.2.2:3001`, не занимая эти порты на остальных IP.
+
+Общий reverse proxy — это ручная схема, когда один Nginx/Caddy принимает весь трафик на `80/443` и сам распределяет его между 3x-ui и агрегатором по разным доменам. Автоматически установщик это не настраивает, чтобы случайно не сломать уже работающую панель.
+
+## Работа с существующими клиентами
+
+Можно работать не только с новыми клиентами, но и с уже созданными в 3x-ui:
+
+- импортировать клиентов с подключённого узла;
+- видеть импортированных клиентов в панели как обычных;
+- выдать им подписку без пересоздания;
+- скопировать клиента на другие узлы;
+- создать новые конфигурации на выбранных серверах.
+
+Это помогает подключить агрегатор к уже работающей системе без полного переноса пользователей.
+
+## Backup и восстановление
+
+В настройках панели можно скачать резервную копию в JSON-файле и восстановить её обратно.
+
+Backup сохраняет пользователей панели, настройки, узлы, клиентов, связи клиентов с узлами и кэш inbound-настроек. Кэш нужен, чтобы после восстановления подписки могли собираться стабильнее, даже если один из 3x-ui узлов временно недоступен.
+
+Имя backup-файла содержит адрес панели, чтобы было проще понять, с какого сервера он был скачан.
+
+Старые backup-файлы можно восстанавливать после обновления проекта. Если в старом backup нет новых настроек адресов, secret-key или кэша inbound, агрегатор добавит недостающие настройки из текущего `.env`, не перезаписывая старые данные клиентов и узлов.
+
+Блок Telegram-бэкапов пока оставлен как заготовка. В будущем туда можно подключить отправку backup-файлов через Telegram Bot API.
+
+
+## Если страница клиентов показывает ошибку
+
+Если вместо списка клиентов появляется ошибка, проверь логи:
 
 ```bash
-sudo mtproto-go status
-sudo mtproto-go logs
-sudo mtproto-go restart
-sudo mtproto-go stop
+docker logs --tail=200 3xui-aggregator
 ```
 
-To update the local quick command later, run the same `install-go` command again or choose the install/update item in the menu.
+В новых версиях панель не должна показывать просто `Internal Server Error`: она покажет понятный текст ошибки или аварийный список клиентов.
 
----
+## Трафик и настройки Happ
 
-## Language selection
+В JSON/SUB-подписках агрегатор показывает расход трафика из 3x-ui. Для этого узлы должны быть доступны, а пароли узлов должны успешно расшифровываться текущим `APP_SECRET`. Если после восстановления backup в логах есть `Unsupported state or unable to authenticate data`, нужно вернуть старый `APP_SECRET` или заново сохранить пароли узлов в панели.
 
-On first launch, both scripts ask which language to use:
+В настройках есть параметры Happ: TCP ping, fragmentation, noises и MUX. Они отправляются в HTTP-заголовках, в теле Happ-подписки и в JSON-блоке `happ`. Если конкретная версия Happ хранит эти переключатели локально и не применяет их повторно при обновлении уже добавленной подписки, нужно удалить подписку в приложении и добавить её заново.
 
-```text
-1) English
-2) Русский
-0) Exit
-```
-
-The selected language is saved and used on the next launches.
-
-Configuration files:
-
-```text
-/etc/proxy-udp.conf
-/etc/mtproto_manager.conf
-```
-
-You can change the language later from the menu:
-
-- Proxy UDP: `High-load tuning and diagnostics` -> `Change language`;
-- MTProto Manager: `Change language`.
-
----
-
-## Proxy UDP features
-
-- Create TCP/UDP forwarding rules.
-- Separate modes for `UDP`, `TCP`, and `UDP + TCP`.
-- `AntizapretVPN by GubernievS` preset without ports `80` and `443`.
-- Remove selected rules.
-- Remove all rules managed by the script.
-- View current rules.
-- Check port availability.
-- Clear the terminal screen when switching menu sections.
-- Colored terminal interface with a soft green accent.
-- Navigation in menu sections:
-  - `0` — go back;
-  - `00` — return to the main menu.
-- English and Russian interface.
-- High-load tuning and diagnostics for NAT/conntrack.
-- NAT mode selection:
-  - `SNAT` — recommended for a static external IPv4 address;
-  - `MASQUERADE` — recommended for a dynamic external IPv4 address.
-- Optional installation of the `proxy-go` command and a systemd service for automatic rule re-application after reboot.
-
----
-
-## Proxy UDP main menu
-
-```text
-1) Create proxy / forwarding rule
-2) AntizapretVPN by GubernievS - port preset without 80/443
-3) Delete selected rules
-4) Delete all rules
-5) Show rules
-6) Port check
-7) High-load tuning and diagnostics
-8) Install/update proxy-go quick command and auto-apply service
-0) Exit
-```
-
----
-
-## AntizapretVPN by GubernievS preset
-
-The preset includes these ports:
-
-```text
-504 508 540 580 50080 50443 51080 51443 52080 52443
-```
-
-Ports `80` and `443` are intentionally not included in the default preset. If you need ports `80` and `443`, add them manually through:
-
-```text
-1) Create proxy / forwarding rule
-```
-
-Available preset modes:
-
-1. Recommended mode:
-   - OpenVPN: `504`, `508`, `50080`, `50443` over TCP and UDP;
-   - WireGuard / AmneziaWG: `540`, `580`, `51080`, `51443`, `52080`, `52443` over UDP.
-2. All preset ports over TCP + UDP.
-3. All preset ports over UDP only.
-4. All preset ports over TCP only.
-
----
-
-## Using Proxy UDP with GubernievS/AntiZapret-VPN
-
-This section is for users of the `GubernievS/AntiZapret-VPN` project who want to use a separate proxy server in front of their AntiZapret VPN server.
-
-Typical scheme:
-
-```text
-Client device -> Proxy UDP server -> AntiZapret VPN server
-```
-
-### 1. Install AntiZapret-VPN on the VPN server
-
-On the AntiZapret VPN server, use the official installation command from the AntiZapret-VPN project:
+## Ручной запуск без установщика
 
 ```bash
-bash <(wget -qO- --no-hsts --inet4-only https://raw.githubusercontent.com/GubernievS/AntiZapret-VPN/main/install.sh)
+cp .env.example .env
+nano .env
+docker compose up -d --build
 ```
 
-### 2. Install Proxy UDP on the proxy server
+## Быстрое меню `agg`
 
-On the proxy server, run:
+После установки доступна команда:
 
 ```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)")
+agg
 ```
 
-Or install the fast command once:
+Через меню можно:
+
+- выполнить новую установку;
+- обновить файлы проекта из GitHub без изменения настроек и базы;
+- изменить режим панели, порт, публичный адрес подписок и привязку портов к IP;
+- переустановить проект заново;
+- создать резервную копию;
+- восстановиться из резервной копии;
+- удалить проект с сервера.
+
+Для изменения режима панели, порта или публичного адреса подписок выбери в `agg` пункт `3 - Изменить настройки установки и обновить`.
+
+При обновлении скрипт сохраняет `.env`, `.install.conf` и папку `data`, поэтому база клиентов не должна пропасть даже если старый каталог был установлен не как git-клон.
+
+При переустановке скрипт сначала скачивает свежую версию проекта во временную папку. Старый каталог удаляется только после успешного скачивания, поэтому проект не должен пропадать из-за ошибки GitHub или сети.
+
+Если локальный `/opt/3xui-aggregator/install.sh` потерян, команда `agg` попробует заново скачать установщик по сохранённой ссылке. После полного удаления проекта команда `agg` тоже удаляется.
+
+## Полное удаление панели
 
 ```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp?$(date +%s)") install-go
-sudo proxy-go
+bash /opt/3xui-aggregator/uninstall.sh
 ```
 
-In the menu, select:
+Команда удаляет контейнеры, каталог `/opt/3xui-aggregator`, быстрый запуск `agg` и сохранённую ссылку установщика. Папка с резервными копиями `/opt/3xui-backups` не удаляется.
+
+То же самое можно сделать через меню:
+
+```bash
+agg
+```
+
+Дальше выбрать пункт `7 - Удалить проект`.
+
+## Связь и предложения
+
+Если есть идеи, предложения или правки, можно написать в Telegram:
 
 ```text
-2) AntizapretVPN by GubernievS - port preset without 80/443
+https://t.me/CHANGE_ME
 ```
 
-Then enter the IPv4 address of your AntiZapret VPN server.
+Замени `CHANGE_ME` на ссылку своего Telegram-канала перед публикацией.
 
-### 3. Replace the server address in client profiles
 
-In your OpenVPN, WireGuard, or AmneziaWG client profiles, replace the AntiZapret VPN server IP/domain with the IP/domain of the proxy server.
+### Совместимость старых backup
 
-### 4. Allow the proxy server on the AntiZapret VPN server
+После восстановления старой резервной копии агрегатор автоматически добавляет недостающие поля базы данных и новые настройки панели. Это нужно, чтобы старые клиенты, узлы и ссылки продолжили открываться в новых версиях проекта.
 
-On the AntiZapret VPN server, add the IPv4 address of the proxy server to:
+Если после восстановления узлы не проходят авторизацию, проверь `APP_SECRET` из старой установки: пароли узлов хранятся в зашифрованном виде. При другом `APP_SECRET` их нужно заново ввести в настройках узлов.
 
-```text
-/root/antizapret/config/allow-ips.txt
-```
+## Исправление ошибки `/clients`
 
-Then run:
+Если после обновления страница клиентов показывала `Internal Server Error`, проверь логи:
 
 ```bash
-/root/antizapret/parse.sh ip
+docker logs --tail=200 3xui-aggregator
 ```
 
-### 5. MTU note
+В этой версии исправлена ошибка SQLite на странице клиентов и ошибка диагностической страницы. Настройки ссылок подписок не менялись: если публичный адрес подписок указан без порта, JSON-ссылки остаются вида `https://домен/json/<slug>`.
 
-If the proxy server has MTU lower than `1500`, reduce MTU in OpenVPN and WireGuard configuration files on the AntiZapret VPN server. This can help avoid packet fragmentation and unstable UDP behavior.
+## Happ: трафик, автообновление и параметры приложения
 
----
+В настройках есть блок **Happ: параметры приложения**. Он управляет JSON/SUB-подпиской:
 
-## How Proxy UDP works
+- интервал автообновления подписки, по умолчанию 1 час;
+- обновление расхода трафика при каждом запросе подписки;
+- TCP ping;
+- фрагментация;
+- шумы;
+- MUX.
 
-The script creates its own iptables chains:
+Для JSON-ссылок агрегатор теперь не только отдаёт HTTP-заголовки Happ, но и добавляет параметры в сам JSON-конфиг. Это помогает Happ вернуть нужные настройки после обновления подписки.
 
-- `PROXY_UDP_NAT` in the `nat` table for DNAT;
-- `PROXY_UDP_POST` in the `nat` table for SNAT/MASQUERADE;
-- `PROXY_UDP_FWD` in the `filter` table for FORWARD allow rules.
-
-Rules are stored in:
-
-```text
-/etc/proxy-udp.rules
-```
-
-Rule format:
-
-```text
-proto source_port target_ip target_port
-```
-
-Example:
-
-```text
-udp 50080 203.0.113.10 50080
-tcp 50443 203.0.113.10 50443
-```
-
-The script manages only its own `PROXY_UDP_*` chains and does not intentionally delete unrelated firewall rules.
-
----
-
-## High load and UDP freezes
-
-If UDP traffic starts freezing or lagging at high speed, the problem is usually not the Bash menu itself. In most cases, the bottleneck is Linux NAT/conntrack.
-
-The menu section `7) High-load tuning and diagnostics` includes:
-
-- system tuning;
-- viewing `nf_conntrack_count` and `nf_conntrack_max`;
-- choosing between `SNAT` and `MASQUERADE`;
-- basic diagnostics for high traffic scenarios.
-
-For a static external IPv4 address, `SNAT` is usually the better choice. For a dynamic external IPv4 address, `MASQUERADE` is usually more convenient.
-
----
-
-## Port checking
-
-The menu section `6) Port check` can check:
-
-- existing forwarding rules;
-- manually entered IP address and port list.
-
-Important: TCP can be checked fairly reliably. UDP cannot be checked with 100% accuracy without an application-level response. If a UDP service does not reply to a probe, it does not always mean the port is closed.
-
-For better UDP checks, installing `netcat` is recommended:
+Если трафик долго показывает `0/50 ГБ`, проверь:
 
 ```bash
-apt-get update
-apt-get install -y netcat-openbsd
+docker logs --tail=200 3xui-aggregator
 ```
 
----
+Если в логах есть ошибка авторизации узла или `Unsupported state or unable to authenticate data`, нужно вернуть старый `APP_SECRET` или заново сохранить пароль узла в панели. Без доступа к 3x-ui агрегатор не сможет получить свежий расход трафика.
 
-## MTProto Manager
+### Если Happ зависает при обновлении подписки
 
-`mtproto-manager` is a separate interactive manager for launching MTProto Proxy in Docker.
+Happ Provider ID можно оставить пустым, но некоторые расширенные параметры Happ могут применяться надёжнее, если ID заполнен. Отсутствие Provider ID не должно ломать подписку.
 
-Run MTProto Manager:
+В этой версии обновление подписки сделано быстрее: агрегатор больше не ждёт каждый узел последовательно. Узлы собираются параллельно, а запрос live-статистики трафика имеет короткий timeout. Если один из 3x-ui узлов медленно отвечает или недоступен, JSON/SUB-ссылка всё равно должна открываться, а ошибка будет видна в логах.
+
+Для временного отключения live-статистики можно снять галочку **Обновлять расход трафика при запросе подписки** в настройках. Сама подписка и список узлов при этом продолжат работать, но расход может обновляться не сразу.
+
+
+## Happ: если JSON в приложении не обновляет параметры
+
+Основная ссылка JSON остаётся такой:
+
+```text
+https://your-domain/json/<slug>
+```
+
+Если Happ быстро получает JSON через `curl`, но в самом приложении параметры TCP ping, fragmentation, noises или MUX не применяются, можно использовать отдельную Happ-совместимую ссылку:
+
+```text
+https://your-domain/happ/<slug>
+```
+
+Она отдаёт обычные VLESS-строки и дублирует настройки Happ официальным способом: через HTTP-заголовки и комментарии в теле подписки. Это полезно для версий Happ, которые не применяют расширенные параметры из JSON-подписки.
+
+Для расширенных параметров Happ укажи `Provider ID` в настройках панели. После изменения настроек лучше удалить старую подписку в Happ и добавить её заново, чтобы приложение заново привязало профиль к Provider ID.
+
+## Исправление HTTP 502 на JSON-подписках
+
+Если название подписки содержит emoji или кириллицу, агрегатор безопасно формирует заголовок скачивания. Это исправляет ошибку `HTTP 502 Bad Gateway` при открытии `/json/<slug>`.
+
+
+## Обновление: отдельная HAPP-подписка
+
+Добавлен отдельный публичный маршрут для Happ:
+
+- `https://your-domain/happ/<slug>`
+
+Что изменилось:
+
+- в **Настройки** добавлен переключатель **«Показывать HAPP-подписку в “Клиенты”»**;
+- если переключатель включён, в таблице **Клиенты** появляется отдельная колонка **HAPP**;
+- для HAPP доступны кнопки **Скопировать HAPP** и **QR**;
+- в разделе настроек теперь показывается пример ссылки `.../happ/<slug>`.
+
+Важно:
+
+- выключение отображения HAPP в интерфейсе скрывает только кнопки в панели;
+- сам маршрут `/happ/:slug` остаётся рабочим для уже выданных ссылок.
+
+
+## Обновление: строгое отключение Happ-настроек
+
+Если в настройках выключить **«Передавать настройки Happ через подписку»**, агрегатор больше не отправляет управляющие Happ-заголовки и комментарии в `/json`, `/sub` и `/happ`.
+
+Это нужно, чтобы Happ не менял локальные параметры приложения, когда ты хочешь выдавать обычную подписку без принудительного TCP ping, icon, fragmentation, noises, MUX и автообновления.
+
+Остаются только обычные серверы подписки и `Subscription-Userinfo`, если он включён отдельно для лимита/срока.
+
+
+## Happ: управление параметрами приложения
+
+В настройках есть главный переключатель **«Передавать настройки Happ через подписку»**.
+
+Если он выключен, агрегатор не отправляет Happ-управляющие параметры вообще. Это полезно, если нужно отдавать обычную подписку и не менять локальные настройки приложения у клиента.
+
+Если он включён, можно отдельно управлять:
+
+- TCP ping;
+- отображением результата пинга значком;
+- фрагментацией;
+- шумами;
+- MUX;
+- автообновлением подписки;
+- обновлением при открытии приложения;
+- пингом при открытии приложения;
+- сворачиванием подписок;
+- принудительным раскрытием подписок;
+- проверкой URL через прокси;
+- sniffing;
+- принудительным применением параметров при обновлении.
+
+Рекомендуемые значения по умолчанию:
+
+- обновлять при открытии приложения: выключено;
+- пинговать при открытии приложения: включено;
+- сворачивание подписок: включено;
+- принудительно раскрывать подписки: выключено.
+
+## Последние улучшения
+
+- Поиск клиентов теперь работает без учёта регистра: `ханза`, `Ханза` и `ХАНЗА` ищутся одинаково.
+- Happ-настройки выключены по умолчанию. Для их работы нужен Provider ID, регистрация домена на happ-proxy.com и достаточный лимит устройств/ссылок. Если Provider ID пустой или главный переключатель выключен, агрегатор не передаёт Happ-параметры в подписку.
+- В настройках Happ вынесены отдельные галочки для TCP ping, иконки пинга, автообновления, пинга при открытии, сворачивания подписок, фрагментации, шумов, MUX и sniffing. MUX/sniffing/фрагментация/шумы лучше включать только после теста.
+- В узле появилась кнопка «Загрузить параметры из 3x-ui». Она подтягивает частые параметры inbound: порт, REALITY/SNI, fingerprint, Short ID, SpiderX и sniffing. Чтобы записать изменения обратно в 3x-ui, нужно отметить галочку сохранения параметров inbound.
+- В маршрутизацию добавлены поля GeoSite/GeoIP и готовые DNS-наборы: Cloudflare, Google, Quad9, Yandex, DoH и ручной режим. GeoSite/GeoIP ссылки сохраняются как справочник для настройки geofiles в 3x-ui/Xray.
+- В настройках добавлен безопасный блок обновления: проверка версии, скачивание backup и копирование команды `agg`. Само обновление выполняется на сервере через `agg`.
+- Сессия входа стала долгоживущей, чтобы на телефоне не приходилось часто заново вставлять ссылку с secret-key.
+
+## Примечание по маршрутизации
+
+После свежей установки готовые сервисы в разделе «Маршрутизация» выключены. Владелец панели сам выбирает, какие geosite/geoip/domain/ip правила отправлять в JSON-подписку. Это сделано, чтобы проект не менял поведение подписок без явной настройки.
+
+## Синхронизация клиентов на новый узел
+
+При добавлении узла можно включить «Импортировать клиентов из нового узла». Эта функция читает клиентов, которые уже есть в выбранном inbound 3x-ui, и добавляет недостающих в агрегатор без дублей. Если нужно повторить действие позже, открой «Изменить» у узла и нажми «Импорт клиентов из 3x-ui».
+
+## Mobile panel login
+
+If the panel uses a secret key, save the phone-friendly login URL from **Settings → What links are issued now**:
+
+```text
+https://your-panel-domain/mobile-login?key=YOUR_SECRET_KEY
+```
+
+This URL stores a long-lived secure cookie, then opens the normal panel login. It is more convenient for Android/iOS home-screen shortcuts than repeatedly pasting `/login?key=...`.
+
+## Importing clients from a 3x-ui node
+
+When adding a node, the checkbox **Import clients from the new node** reads clients that already exist in the selected 3x-ui inbound and adds missing records to the aggregator. It does not create duplicates. The same import can be repeated later from the node list with the **Import** button.
+
+The subscription generator supports VLESS/TCP/REALITY and VLESS/XHTTP/REALITY in JSON mode. XHTTP profiles are detected from `streamSettings.network = "xhttp"` and include `xhttpSettings` such as path, mode and stream-one parameters. WireGuard is not enabled yet and should be added as a separate protocol stage.
+
+
+## XHTTP / JSON-подписка
+
+Агрегатор умеет определять VLESS + XHTTP + REALITY по `streamSettings.network = "xhttp"` в inbound 3x-ui. Для JSON-подписки сохраняются основные параметры:
+
+- `xhttpSettings.path`;
+- `xhttpSettings.host`;
+- `xhttpSettings.mode`;
+- `scMaxConcurrentPosts`;
+- `scMaxEachPostBytes`;
+- `scMinPostsIntervalMs`;
+- `sockopt.dialerProxy = fragment`, если он есть в inbound.
+
+MUX и Sniffing вынесены в отдельные настройки **JSON/Xray** и по умолчанию выключены. Их можно включать независимо друг от друга после теста на конкретных клиентах.
+
+## Несколько панелей на одном VPS
+
+Проект поддерживает несколько независимых экземпляров на одном сервере. Это полезно, если у VPS несколько IP и нужно держать 2–3 отдельные панели для разных проектов.
+
+При новой установке установщик спросит **имя экземпляра**:
+
+- `default` → `/opt/3xui-aggregator`, контейнеры `3xui-aggregator` и `3xui-aggregator-caddy`;
+- `project1` → `/opt/3xui-aggregator-project1`, контейнеры `3xui-aggregator-project1` и `3xui-aggregator-project1-caddy`.
+
+Для каждого экземпляра можно указать свой IP привязки Caddy. Тогда один сервер может слушать несколько панелей так:
+
+```text
+IP-1:80/443 → панель project1
+IP-2:80/443 → панель project2
+IP-3:80/443 → панель project3
+```
+
+Важно: другие сервисы не должны слушать `0.0.0.0:80` или `0.0.0.0:443`, иначе они займут порт на всех IP. Для мульти-IP схемы каждый сервис должен быть привязан к своему IP.
+
+После установки можно запускать:
 
 ```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)")
+agg
 ```
 
-Install the fast `mtproto-go` command:
+Если экземпляров несколько, меню предложит выбрать нужный. Также создаётся команда вида:
 
 ```bash
-bash <(wget -qO- --inet4-only "https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager?$(date +%s)") install-go
-sudo mtproto-go
+agg-project1
 ```
 
-Main features:
+для прямого управления конкретным экземпляром.
 
-- create and start MTProto Proxy;
-- stop and restart the container;
-- show proxy status;
-- show the Telegram connection link;
-- change the external port;
-- regenerate the proxy secret/key;
-- change workers;
-- show Docker logs;
-- update the Docker image;
-- remove the container and configuration;
-- English and Russian interface.
+## Автообновление подписки
 
-MTProto Manager uses Docker. If Docker is missing, the script can try to install it automatically on Debian/Ubuntu.
-
----
-
-## Requirements
-
-### For Proxy UDP
-
-- Debian/Ubuntu or another Linux distribution with `iptables`.
-- Root access.
-- IPv4 forwarding.
-- For extended diagnostics: `conntrack-tools`.
-- For UDP checks: `netcat-openbsd`.
-
-### For MTProto Manager
-
-- Debian/Ubuntu recommended.
-- Root access.
-- Docker.
-- If Docker is missing, the manager will try to install it on Debian/Ubuntu.
-
----
-
-## Safety note
-
-Before using firewall/NAT scripts on a production server, it is recommended to have emergency access through your hosting provider's rescue console, VNC, or serial console. This helps avoid losing access if a firewall rule is configured incorrectly.
+В настройках есть отдельная галочка **«Передавать автообновление в подписке»** и поле интервала в часах. Это не зависит от Happ Provider ID. Если включено, JSON/SUB будут отдавать заголовки автообновления, например для интервала `1` — примерно каждый час.

@@ -1,0 +1,203 @@
+<%- include('partials_header', { pageTitle: 'Главная', pageSubtitle: 'Клиенты, сроки, онлайн и лимиты', activePage: 'dashboard' }) %>
+<%
+  function daysLeft(ts) {
+    const n = Number(ts || 0);
+    if (!Number.isFinite(n) || n <= 0) return '∞';
+    const diff = n - now;
+    if (diff <= 0) return '0';
+    return String(Math.ceil(diff / 86400000));
+  }
+  function termText(client) {
+    const left = Number(daysLeft(client.expiry_time));
+    if (!Number.isFinite(left)) return '∞';
+    return `${left} дн.`;
+  }
+  function dateText(ts) {
+    const n = Number(ts || 0);
+    if (!Number.isFinite(n) || n <= 0) return '∞';
+    return new Date(n).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function gbText(bytes, digits = 1) {
+    const n = Math.max(0, Number(bytes || 0));
+    const gb = n / 1024 / 1024 / 1024;
+    const maxDigits = gb >= 10 ? 0 : digits;
+    return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: maxDigits }).format(gb) + ' ГБ';
+  }
+  function nodeTitle(row) {
+    const suffix = String(row.label_suffix || '').trim();
+    const base = row.country_name_ru || row.name || 'Узел';
+    return suffix ? (/^\d+$/.test(suffix) ? `${base}-${suffix}` : `${base} / ${suffix}`) : base;
+  }
+  function flagImg(code, fallback) {
+    const raw = String(code || fallback || '').trim();
+    const cc = String(code || '').trim().toUpperCase();
+    const emoji = cc.length === 2
+      ? String.fromCodePoint(...[...cc].map(ch => 127397 + ch.charCodeAt(0)))
+      : (/^[A-Z]{2}$/.test(raw) ? String.fromCodePoint(...[...raw].map(ch => 127397 + ch.charCodeAt(0))) : raw);
+    return emoji ? '<span class=\"flag-emoji\">' + emoji + '</span>' : '';
+  }
+%>
+
+<% if (message) { %><div class="alert ok"><%= message %></div><% } %>
+<% if (error) { %><div class="alert err"><%= error %></div><% } %>
+
+<div class="grid dashboard-grid">
+  <section class="stats-card span-3">
+    <div class="stats-label">Узлов</div>
+    <div class="stats-number"><%= stats.nodes %></div>
+  </section>
+  <section class="stats-card span-3">
+    <div class="stats-label">Клиентов</div>
+    <div class="stats-number"><%= stats.clients %></div>
+  </section>
+  <section class="stats-card span-3">
+    <div class="stats-label">Узлов онлайн</div>
+    <div class="stats-number"><%= stats.online %></div>
+  </section>
+  <section class="stats-card span-3">
+    <div class="stats-label">Узлов оффлайн</div>
+    <div class="stats-number"><%= stats.offline %></div>
+  </section>
+
+  <section class="card span-12 dashboard-actions-card">
+    <form method="get" action="/dashboard" class="dashboard-action-form js-long-action" data-loading-title="Проверяю онлайн" data-loading-text="Запрашиваю онлайн-клиентов на активных узлах. Это может занять время.">
+      <input type="hidden" name="online" value="1" />
+      <button type="submit" class="btn-main">Онлайн клиенты</button>
+    </form>
+    <button type="button" class="btn-secondary" onclick="openDashboardModal('limitsModal')">Лимиты</button>
+    <a href="/clients" class="link-btn secondary">Клиенты</a>
+  </section>
+
+  <% if (showOnlineClients) { %>
+    <section class="card span-12">
+      <h2>Онлайн клиенты</h2>
+      <% if (onlineErrors && onlineErrors.length) { %>
+        <div class="alert err"><%= onlineErrors.join(' | ') %></div>
+      <% } %>
+      <% if (!onlineClients || !onlineClients.length) { %>
+        <p class="muted">Онлайн-клиентов не найдено или узлы не вернули список.</p>
+      <% } else { %>
+        <% const pageSize = Number(onlinePerPage || 10) === 9999 ? 9999 : 10; %>
+        <% const page = Math.max(1, Number(onlinePage || 1)); %>
+        <% const totalPages = Math.max(1, Math.ceil(onlineClients.length / pageSize)); %>
+        <% const safePage = Math.min(page, totalPages); %>
+        <% const shownClients = onlineClients.slice((safePage - 1) * pageSize, safePage * pageSize); %>
+        <div class="dashboard-list-toolbar">
+          <span class="muted">Показано <%= shownClients.length %> из <%= onlineClients.length %></span>
+          <div class="pagination-row">
+            <% if (pageSize !== 9999 && totalPages > 1) { %>
+              <a class="link-btn secondary" href="/dashboard?online=1&online_page=<%= Math.max(1, safePage - 1) %>">Назад</a>
+              <span class="count-chip"><%= safePage %>/<%= totalPages %></span>
+              <a class="link-btn secondary" href="/dashboard?online=1&online_page=<%= Math.min(totalPages, safePage + 1) %>">Вперёд</a>
+            <% } %>
+            <a class="link-btn secondary" href="/dashboard?online=1&online_per_page=9999">Показать всех</a>
+            <% if (pageSize === 9999) { %><a class="link-btn secondary" href="/dashboard?online=1">Страницами</a><% } %>
+          </div>
+        </div>
+        <div class="dashboard-client-list online-list">
+          <% shownClients.forEach(client => { %>
+            <div class="dashboard-client-card online-client-card">
+              <div class="dashboard-client-main">
+                <strong><%= client.login %></strong>
+                <small><%= client.comment || client.display_name || '-' %></small>
+              </div>
+              <div class="dashboard-client-meta online-meta">
+                <span>До: <%= dateText(client.expiry_time) %></span>
+                <span>Осталось: <%= termText(client) %></span>
+              </div>
+              <div class="online-node-badges">
+                <% (client.nodes || []).forEach(n => { %>
+                  <span class="node-badge"><%- flagImg(n.countryCode, n.flag) %><%= n.name || n.publicName || '-' %></span>
+                <% }) %>
+              </div>
+            </div>
+          <% }) %>
+        </div>
+      <% } %>
+    </section>
+  <% } %>
+
+  <section class="card span-12">
+    <div class="section-title-row">
+      <h2>Сроки заканчиваются в ближайшие 7 дней</h2>
+      <span class="count-chip"><%= expiringClients ? expiringClients.length : 0 %></span>
+    </div>
+
+    <% if (!expiringClients || !expiringClients.length) { %>
+      <p class="muted">На ближайшую неделю клиентов с истекающим сроком нет.</p>
+    <% } else { %>
+      <div class="dashboard-client-list">
+        <% expiringClients.forEach(client => { %>
+          <div class="dashboard-client-card warning">
+            <div class="dashboard-client-main">
+              <strong><a href="/clients/<%= client.id %>"><%= client.login %></a></strong>
+              <small><%= client.comment || client.display_name || '-' %></small>
+            </div>
+            <div class="dashboard-client-meta">
+              <span>Осталось: <%= termText(client) %></span>
+              <span>Истекает: <%= dateText(client.expiry_time) %></span>
+            </div>
+            <form method="post" action="/clients/<%= client.id %>/extend" class="mini-extend-form js-long-action" data-loading-title="Продлеваю клиента" data-loading-text="Применяю новый срок на узлах клиента.">
+              <input name="days" type="number" min="1" value="30" />
+              <button type="submit" class="btn-secondary">Продлить</button>
+            </form>
+          </div>
+        <% }) %>
+      </div>
+    <% } %>
+  </section>
+</div>
+
+<div id="limitsModal" class="modal hidden" onclick="closeDashboardModal(event, 'limitsModal')">
+  <div class="modal-card editor-modal" onclick="event.stopPropagation()">
+    <button type="button" class="modal-close" onclick="hideDashboardModal('limitsModal')">×</button>
+    <h2>Лимиты трафика</h2>
+    <p class="muted">Показываются только узлы, где задан лимит ГБ.</p>
+    <% if (!limitedClients || !limitedClients.length) { %>
+      <p class="muted">Лимитов ГБ на узлах пока нет.</p>
+    <% } else { %>
+      <div class="limit-dashboard-list">
+        <% limitedClients.forEach(row => { %>
+          <div class="limit-dashboard-row">
+            <div>
+              <strong><%= row.login %></strong>
+              <small><%= row.comment || '-' %> · <%= nodeTitle(row) %></small>
+            </div>
+            <div class="limit-dashboard-values">
+              <span><%= gbText(row.used_bytes) %> / <%= row.traffic_gb %> ГБ</span>
+              <strong>Осталось: <%= gbText(row.remaining_bytes) %></strong>
+            </div>
+          </div>
+        <% }) %>
+      </div>
+    <% } %>
+  </div>
+</div>
+
+<div id="loadingModal" class="modal hidden loading-modal" aria-live="polite">
+  <div class="modal-card loading-card">
+    <div class="loader-ring"></div>
+    <h2 id="loadingTitle">Загрузка</h2>
+    <p class="muted" id="loadingText">Операция выполняется. Не закрывайте страницу.</p>
+  </div>
+</div>
+
+<script>
+function openDashboardModal(id) { document.getElementById(id)?.classList.remove('hidden'); }
+function hideDashboardModal(id) { document.getElementById(id)?.classList.add('hidden'); }
+function closeDashboardModal(e, id) { if (e.target.id === id) hideDashboardModal(id); }
+function showLoading(title, text) {
+  const modal = document.getElementById('loadingModal');
+  if (!modal) return;
+  document.getElementById('loadingTitle').textContent = title || 'Загрузка';
+  document.getElementById('loadingText').textContent = text || 'Операция выполняется. Не закрывайте страницу.';
+  modal.classList.remove('hidden');
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('form.js-long-action').forEach(form => {
+    form.addEventListener('submit', () => showLoading(form.dataset.loadingTitle, form.dataset.loadingText));
+  });
+});
+</script>
+
+<%- include('partials_footer') %>
