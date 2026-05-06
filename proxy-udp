@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="MTProto Proxy Manager"
-RAW_URL="https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/mtproto-manager"
-CONF="/etc/mtproto_manager.conf"
-QUICK_CMD="/usr/local/bin/mtproto-go"
-CONTAINER_NAME="mtproto-proxy"
-IMAGE="telegrammessenger/proxy:latest"
-VOLUME_NAME="mtproto-proxy-data"
-DEFAULT_PORT="443"
-DEFAULT_WORKERS="2"
+APP_NAME="Proxy UDP"
+RAW_URL="https://raw.githubusercontent.com/dagmagnat/proxy-udp/main/proxy-udp"
+STATE_FILE="/etc/proxy-udp.rules"
+CONFIG_FILE="/etc/proxy-udp.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-proxy-udp-manager.conf"
+QUICK_CMD="/usr/local/bin/proxy-go"
+SERVICE_FILE="/etc/systemd/system/proxy-go.service"
+CHAIN_NAT="PROXY_UDP_NAT"
+CHAIN_FWD="PROXY_UDP_FWD"
+CHAIN_POST="PROXY_UDP_POST"
+
+DEFAULT_PORTS=(504 508 540 580 50080 50443 51080 51443 52080 52443)
+ANTIZAPRET_OPENVPN_PORTS=(504 508 50080 50443)
+ANTIZAPRET_WG_PORTS=(540 580 51080 51443 52080 52443)
 
 SOFT_GREEN='\033[38;5;114m'
 YELLOW='\033[1;33m'
@@ -18,15 +23,15 @@ CYAN='\033[0;36m'
 DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
+
 MSG_BACK="__BACK__"
 MSG_MAIN="__MAIN__"
-
 LANGUAGE=""
-CONF_PORT=""
-CONF_SECRET=""
-CONF_WORKERS=""
-CONF_TAG=""
+NAT_MODE="snat"
+WAN_IF=""
+WAN_IP=""
 NAV_VALUE=""
+CHOSEN_PROTOCOL=""
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
@@ -36,87 +41,99 @@ trim() {
   printf "%s" "$s"
 }
 
-cls() { printf '\033[H\033[2J\033[3J'; }
+cls() {
+  printf '\033[H\033[2J\033[3J'
+}
 
 text() {
   local key="$1"
   case "${LANGUAGE:-ru}:$key" in
     en:choose_lang) echo "Select interface language" ;;
     ru:choose_lang) echo "Выберите язык интерфейса" ;;
-    en:choice) echo "Your choice: " ;;
-    ru:choice) echo "Ваш выбор: " ;;
+    en:english) echo "English" ;;
+    ru:english) echo "English" ;;
+    en:russian) echo "Russian" ;;
+    ru:russian) echo "Русский" ;;
     en:exit) echo "Exit" ;;
     ru:exit) echo "Выход" ;;
     en:back) echo "Back" ;;
     ru:back) echo "Назад" ;;
+    en:choice) echo "Your choice: " ;;
+    ru:choice) echo "Ваш выбор: " ;;
     en:back_hint) echo "0 - back, 00 - main menu" ;;
     ru:back_hint) echo "0 — назад, 00 — главное меню" ;;
     en:main_menu) echo "Main menu" ;;
     ru:main_menu) echo "Главное меню" ;;
-    en:create_start) echo "Create/start MTProto Proxy" ;;
-    ru:create_start) echo "Создать/запустить MTProto Proxy" ;;
-    en:stop) echo "Stop" ;;
-    ru:stop) echo "Остановить" ;;
-    en:restart) echo "Restart" ;;
-    ru:restart) echo "Перезапустить" ;;
-    en:status) echo "Status and statistics" ;;
-    ru:status) echo "Статус и статистика" ;;
-    en:show_link) echo "Show Telegram link" ;;
-    ru:show_link) echo "Показать ссылку для Telegram" ;;
-    en:change_port) echo "Change port" ;;
-    ru:change_port) echo "Изменить порт" ;;
-    en:regen_secret) echo "Regenerate secret" ;;
-    ru:regen_secret) echo "Пересоздать secret" ;;
-    en:workers) echo "Change workers" ;;
-    ru:workers) echo "Изменить workers" ;;
-    en:logs) echo "Logs" ;;
-    ru:logs) echo "Логи" ;;
-    en:update) echo "Update Docker image" ;;
-    ru:update) echo "Обновить Docker-образ" ;;
-    en:delete_all) echo "Delete everything" ;;
-    ru:delete_all) echo "Удалить всё" ;;
+    en:create_proxy) echo "Create proxy / forwarding rule" ;;
+    ru:create_proxy) echo "Создать прокси / перенаправление" ;;
+    en:antizapret) echo "AntizapretVPN by GubernievS - port preset without 80/443" ;;
+    ru:antizapret) echo "AntizapretVPN by GubernievS — preset портов без 80/443" ;;
+    en:delete_selected) echo "Delete selected rules" ;;
+    ru:delete_selected) echo "Удалить выбранные правила" ;;
+    en:delete_all) echo "Delete all rules" ;;
+    ru:delete_all) echo "Удалить все правила" ;;
+    en:show_rules) echo "Show rules" ;;
+    ru:show_rules) echo "Посмотреть правила" ;;
+    en:port_check) echo "Port check" ;;
+    ru:port_check) echo "Проверка портов" ;;
+    en:settings) echo "High-load tuning and diagnostics" ;;
+    ru:settings) echo "Настройки и диагностика высокой нагрузки" ;;
+    en:install_quick) echo "Install/update proxy-go quick command and auto-apply service" ;;
+    ru:install_quick) echo "Установить/обновить быструю команду proxy-go и автоприменение" ;;
     en:change_language) echo "Change language" ;;
     ru:change_language) echo "Сменить язык" ;;
-    en:install_quick) echo "Install/update mtproto-go quick command" ;;
-    ru:install_quick) echo "Установить/обновить быструю команду mtproto-go" ;;
     en:pause) echo "Press Enter to continue... " ;;
     ru:pause) echo "Нажмите Enter чтобы продолжить... " ;;
     en:not_root) echo "Run this script as root" ;;
     ru:not_root) echo "Запустите скрипт от root" ;;
     en:bad_choice) echo "Invalid choice." ;;
     ru:bad_choice) echo "Неверный выбор." ;;
-    en:docker_missing) echo "Docker is not installed. Trying to install docker.io through apt..." ;;
-    ru:docker_missing) echo "Docker не найден. Пытаюсь установить docker.io через apt..." ;;
-    en:proxy_not_configured) echo "Proxy is not configured. Create/start it first." ;;
-    ru:proxy_not_configured) echo "Прокси не настроен. Сначала создайте/запустите прокси." ;;
-    en:port_prompt) echo "Port" ;;
-    ru:port_prompt) echo "Порт" ;;
-    en:new_port) echo "New port: " ;;
-    ru:new_port) echo "Новый порт: " ;;
-    en:bad_port) echo "Invalid port." ;;
-    ru:bad_port) echo "Неверный порт." ;;
-    en:port_busy) echo "Port is busy." ;;
-    ru:port_busy) echo "Порт занят." ;;
-    en:started) echo "MTProto Proxy started." ;;
-    ru:started) echo "MTProto Proxy запущен." ;;
-    en:stopped) echo "Container stopped." ;;
-    ru:stopped) echo "Контейнер остановлен." ;;
-    en:not_running) echo "Container is not running." ;;
-    ru:not_running) echo "Контейнер не запущен." ;;
-    en:restarted) echo "Restarted." ;;
-    ru:restarted) echo "Перезапущено." ;;
-    en:secret_updated) echo "Secret updated. Restarting..." ;;
-    ru:secret_updated) echo "Secret обновлён. Выполняю перезапуск..." ;;
-    en:workers_saved) echo "Workers saved. Restarting..." ;;
-    ru:workers_saved) echo "Workers сохранён. Выполняю перезапуск..." ;;
-    en:quick_done) echo "Quick command installed" ;;
-    ru:quick_done) echo "Быстрая команда установлена" ;;
+    en:target_ip) echo "Target server IPv4 address: " ;;
+    ru:target_ip) echo "IPv4-адрес сервера назначения: " ;;
+    en:bad_ip) echo "Invalid IPv4 address. Example: 192.0.2.10" ;;
+    ru:bad_ip) echo "Неверный IPv4-адрес. Пример: 192.0.2.10" ;;
+    en:choose_proto) echo "Choose protocol" ;;
+    ru:choose_proto) echo "Выберите протокол" ;;
+    en:udp_tcp) echo "UDP and TCP" ;;
+    ru:udp_tcp) echo "UDP и TCP" ;;
+    en:default_ports) echo "Default ports" ;;
+    ru:default_ports) echo "Порты по умолчанию" ;;
+    en:ports_prompt) echo "Ports separated by spaces [Enter = default ports]: " ;;
+    ru:ports_prompt) echo "Порты через пробел [Enter = порты по умолчанию]: " ;;
+    en:added) echo "Added" ;;
+    ru:added) echo "Добавлено" ;;
+    en:exists) echo "Already exists" ;;
+    ru:exists) echo "Уже есть" ;;
+    en:applied) echo "Rules applied." ;;
+    ru:applied) echo "Правила применены." ;;
+    en:no_rules) echo "No rules." ;;
+    ru:no_rules) echo "Правил нет." ;;
+    en:current_rules) echo "Current rules" ;;
+    ru:current_rules) echo "Текущие правила" ;;
+    en:delete_numbers) echo "Rule numbers to delete, separated by spaces: " ;;
+    ru:delete_numbers) echo "Номера правил для удаления через пробел: " ;;
+    en:deleted) echo "Deleted." ;;
+    ru:deleted) echo "Удаление выполнено." ;;
     en:confirm_yes) echo "Type YES to confirm: " ;;
     ru:confirm_yes) echo "Введите YES для подтверждения: " ;;
     en:cancelled) echo "Cancelled." ;;
     ru:cancelled) echo "Отменено." ;;
-    en:deleted) echo "Deleted." ;;
-    ru:deleted) echo "Удалено." ;;
+    en:all_deleted) echo "All managed rules were deleted." ;;
+    ru:all_deleted) echo "Все управляемые правила удалены." ;;
+    en:check_current) echo "Check current rules" ;;
+    ru:check_current) echo "Проверить текущие правила" ;;
+    en:check_custom) echo "Check custom IP and ports" ;;
+    ru:check_custom) echo "Проверить IP/порты вручную" ;;
+    en:tune_apply) echo "Apply high-load network tuning" ;;
+    ru:tune_apply) echo "Применить сетевой тюнинг для высокой нагрузки" ;;
+    en:conntrack_show) echo "Show conntrack statistics" ;;
+    ru:conntrack_show) echo "Показать conntrack-статистику" ;;
+    en:nat_mode) echo "Change NAT mode: SNAT/MASQUERADE" ;;
+    ru:nat_mode) echo "Сменить NAT mode: SNAT/MASQUERADE" ;;
+    en:quick_done) echo "Quick command installed" ;;
+    ru:quick_done) echo "Быстрая команда установлена" ;;
+    en:service_done) echo "Auto-apply service enabled" ;;
+    ru:service_done) echo "Автоприменение правил включено" ;;
     *) echo "$key" ;;
   esac
 }
@@ -126,7 +143,10 @@ warn() { echo -e "${YELLOW}$*${RESET}"; }
 err() { echo -e "${RED}$*${RESET}" >&2; }
 info() { echo -e "${CYAN}$*${RESET}"; }
 
-pause() { echo; read -r -p "$(text pause)" _ || true; }
+pause() {
+  echo
+  read -r -p "$(text pause)" _ || true
+}
 
 header() {
   cls
@@ -142,51 +162,37 @@ require_root() {
   fi
 }
 
-valid_port() {
-  local p
-  p="$(trim "${1:-}")"
-  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 1
-  ((p >= 1 && p <= 65535)) || return 1
-}
-
-valid_secret() {
-  local s
-  s="$(trim "${1:-}")"
-  [[ "$s" =~ ^[0-9a-fA-F]{32}$ ]]
-}
-
-valid_workers() {
-  local w
-  w="$(trim "${1:-}")"
-  [[ "$w" =~ ^[0-9]+$ ]] || return 1
-  ((w >= 1 && w <= 64)) || return 1
-}
-
-init_conf() {
-  if [[ ! -f "$CONF" ]]; then
-    cat > "$CONF" <<EOF_CONF
-# MTProto Proxy Manager config
-LANGUAGE=
-PORT=
-SECRET=
-WORKERS=$DEFAULT_WORKERS
-TAG=
-EOF_CONF
-    chmod 600 "$CONF"
+ensure_prereqs() {
+  local missing=()
+  for c in iptables ip sysctl awk grep sed sort uniq nl; do
+    cmd_exists "$c" || missing+=("$c")
+  done
+  if ((${#missing[@]} > 0)); then
+    err "Missing dependencies: ${missing[*]}"
+    err "apt-get update && apt-get install -y iptables iproute2 coreutils gawk grep sed"
+    exit 1
   fi
 }
 
-conf_reset() {
-  CONF_PORT=""
-  CONF_SECRET=""
-  CONF_WORKERS=""
-  CONF_TAG=""
+init_files() {
+  if [[ ! -f "$STATE_FILE" ]]; then
+    touch "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+  fi
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat > "$CONFIG_FILE" <<EOF_CONF
+# Proxy UDP manager config
+LANGUAGE=
+NAT_MODE=snat
+EOF_CONF
+    chmod 600 "$CONFIG_FILE"
+  fi
 }
 
-conf_load() {
-  conf_reset
+load_config() {
   LANGUAGE=""
-  [[ -f "$CONF" ]] || return 0
+  NAT_MODE="snat"
+  [[ -f "$CONFIG_FILE" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="$(trim "$line")"
     [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *=* ]] && continue
@@ -196,37 +202,22 @@ conf_load() {
     val="$(trim "$val")"
     case "$key" in
       LANGUAGE) [[ "$val" == "en" || "$val" == "ru" ]] && LANGUAGE="$val" ;;
-      PORT) CONF_PORT="$val" ;;
-      SECRET|KEY) CONF_SECRET="$val" ;;
-      WORKERS) CONF_WORKERS="$val" ;;
-      TAG) CONF_TAG="$val" ;;
+      NAT_MODE) [[ "$val" == "snat" || "$val" == "masquerade" ]] && NAT_MODE="$val" ;;
     esac
-  done < "$CONF"
-  valid_port "$CONF_PORT" || CONF_PORT=""
-  valid_secret "$CONF_SECRET" || CONF_SECRET=""
-  valid_workers "$CONF_WORKERS" || CONF_WORKERS="$DEFAULT_WORKERS"
-  [[ "$CONF_TAG" =~ ^[0-9a-fA-F]{32}$ ]] || CONF_TAG=""
+  done < "$CONFIG_FILE"
 }
 
-conf_save() {
-  local port="$1" secret="$2" workers="${3:-$DEFAULT_WORKERS}" tag="${4:-$CONF_TAG}" lang="${LANGUAGE:-}"
-  cat > "$CONF" <<EOF_CONF
-# MTProto Proxy Manager config
-LANGUAGE=$lang
-PORT=$port
-SECRET=$secret
-WORKERS=$workers
-TAG=$tag
+save_config() {
+  cat > "$CONFIG_FILE" <<EOF_CONF
+# Proxy UDP manager config
+LANGUAGE=${LANGUAGE:-}
+NAT_MODE=$NAT_MODE
 EOF_CONF
-  chmod 600 "$CONF"
+  chmod 600 "$CONFIG_FILE"
 }
 
 choose_language() {
-  local sel current_port current_secret current_workers current_tag
-  current_port="$CONF_PORT"
-  current_secret="$CONF_SECRET"
-  current_workers="${CONF_WORKERS:-$DEFAULT_WORKERS}"
-  current_tag="$CONF_TAG"
+  local sel
   while true; do
     cls
     echo -e "${SOFT_GREEN}${BOLD}${APP_NAME}${RESET}"
@@ -239,8 +230,8 @@ choose_language() {
     read -r -p "$(text choice)" sel
     sel="$(trim "$sel")"
     case "$sel" in
-      1) LANGUAGE="en"; conf_save "$current_port" "$current_secret" "$current_workers" "$current_tag"; cls; return 0 ;;
-      2) LANGUAGE="ru"; conf_save "$current_port" "$current_secret" "$current_workers" "$current_tag"; cls; return 0 ;;
+      1) LANGUAGE="en"; save_config; cls; return 0 ;;
+      2) LANGUAGE="ru"; save_config; cls; return 0 ;;
       0) exit 0 ;;
       *) warn "$(text bad_choice)"; sleep 1 ;;
     esac
@@ -248,7 +239,7 @@ choose_language() {
 }
 
 ensure_language() {
-  conf_load
+  load_config
   if [[ "$LANGUAGE" != "en" && "$LANGUAGE" != "ru" ]]; then
     LANGUAGE="ru"
     choose_language
@@ -269,289 +260,492 @@ read_nav() {
 is_back() { [[ "${NAV_VALUE:-}" == "$MSG_BACK" ]]; }
 is_main() { [[ "${NAV_VALUE:-}" == "$MSG_MAIN" ]]; }
 
-port_free() {
-  local p="$1"
-  if cmd_exists ss; then
-    ! ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
-  elif cmd_exists netstat; then
-    ! netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"
-  else
-    return 0
-  fi
-}
-
-rand_hex_16bytes() {
-  if cmd_exists openssl; then
-    openssl rand -hex 16
-  else
-    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
-  fi
-}
-
-pick_random_port() {
-  local tries=0 p
-  while true; do
-    p=$((20000 + (RANDOM % 45000)))
-    tries=$((tries + 1))
-    if valid_port "$p" && port_free "$p"; then echo "$p"; return 0; fi
-    ((tries >= 600)) && return 1
-  done
-}
-
-ensure_docker() {
-  if cmd_exists docker; then return 0; fi
-  warn "$(text docker_missing)"
-  if cmd_exists apt-get; then
-    apt-get update -y
-    apt-get install -y docker.io
-    systemctl enable --now docker || true
-  else
-    err "Auto-install is available only on Debian/Ubuntu with apt. Install Docker manually."
-    exit 1
-  fi
-  cmd_exists docker || { err "Docker installation failed."; exit 1; }
-}
-
-get_public_ip() {
-  local ip=""
-  if cmd_exists curl; then
-    ip="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 4 https://ifconfig.me 2>/dev/null || true)"
-  elif cmd_exists wget; then
-    ip="$(wget -qO- --timeout=4 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(wget -qO- --timeout=4 https://ifconfig.me 2>/dev/null || true)"
-  fi
-  echo "$ip"
-}
-
-open_firewall_iptables() {
-  local port="$1"
-  if cmd_exists iptables; then
-    iptables -w -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -w -I INPUT -p tcp --dport "$port" -j ACCEPT
-  fi
-}
-
-remove_firewall_iptables() {
-  local port="$1"
-  if cmd_exists iptables; then
-    while iptables -w -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null; do :; done
-  fi
-}
-
-container_exists() { docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; }
-container_running() { docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; }
-
-show_link() {
-  conf_load
-  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then
-    warn "$(text proxy_not_configured)"
-    return 0
-  fi
+valid_ip() {
   local ip
-  ip="$(get_public_ip)"
-  echo
-  if [[ "$LANGUAGE" == "en" ]]; then
-    echo "MTProto Proxy data:"
+  ip="$(trim "${1:-}")"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local o1 o2 o3 o4
+  IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    [[ "$o" =~ ^[0-9]+$ ]] || return 1
+    ((o >= 0 && o <= 255)) || return 1
+  done
+}
+
+valid_port() {
+  local p
+  p="$(trim "${1:-}")"
+  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 1
+  ((p >= 1 && p <= 65535)) || return 1
+}
+
+uniq_words() {
+  awk '{for(i=1;i<=NF;i++){if(!seen[$i]++){out=out (out?OFS:"") $i}}} END{print out}' <<< "$*"
+}
+
+detect_wan_if() {
+  local ifn
+  ifn="$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)"
+  if [[ -n "${ifn:-}" ]]; then
+    echo "$ifn"
   else
-    echo "Данные MTProto Proxy:"
-  fi
-  echo "Port   : $CONF_PORT"
-  echo "Secret : $CONF_SECRET"
-  echo "Workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}"
-  [[ -n "$CONF_TAG" ]] && echo "Tag    : $CONF_TAG"
-  echo
-  if [[ -n "$ip" ]]; then
-    echo "Server IP: $ip"
-    echo "Telegram link:"
-    echo "tg://proxy?server=${ip}&port=${CONF_PORT}&secret=${CONF_SECRET}"
-    echo
-    echo "t.me link:"
-    echo "https://t.me/proxy?server=${ip}&port=${CONF_PORT}&secret=${CONF_SECRET}"
-  else
-    warn "Could not detect public IP automatically. Insert your IP manually:"
-    echo "tg://proxy?server=YOUR_IP&port=${CONF_PORT}&secret=${CONF_SECRET}"
+    ip -br link | awk '$1 !~ /^lo$/ {print $1; exit}'
   fi
 }
 
-ensure_config_interactive() {
-  conf_load
-  local port="${CONF_PORT:-}" secret="${CONF_SECRET:-}" workers="${CONF_WORKERS:-$DEFAULT_WORKERS}" tag="${CONF_TAG:-}" value random_port
-  [[ -z "$secret" ]] && secret="$(rand_hex_16bytes)"
-  [[ -z "$workers" ]] && workers="$DEFAULT_WORKERS"
-  while [[ -z "$port" ]]; do
-    read_nav "$(text port_prompt) [Enter = $DEFAULT_PORT]: "
-    is_back && return 1
-    is_main && return 10
-    value="$NAV_VALUE"
-    [[ -z "$value" ]] && value="$DEFAULT_PORT"
-    if ! valid_port "$value"; then warn "$(text bad_port)"; continue; fi
-    if ! port_free "$value"; then
-      random_port="$(pick_random_port || true)"
-      warn "$(text port_busy) Random free port: ${random_port:-not found}"
-      [[ -n "$random_port" ]] && value="$random_port" || continue
+detect_wan_ip() {
+  local ipaddr
+  ipaddr="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1)"
+  if [[ -n "${ipaddr:-}" ]]; then
+    echo "$ipaddr"
+  else
+    ip -4 addr show dev "$WAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1
+  fi
+}
+
+refresh_net_info() {
+  WAN_IF="$(detect_wan_if)"
+  WAN_IP="$(detect_wan_ip)"
+}
+
+normalize_state_file() {
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    NF >= 3 && $1 !~ /^#/ {
+      proto=tolower($1); sport=$2; tip=$3; dport=$4;
+      if(dport=="") dport=sport;
+      if((proto=="tcp" || proto=="udp") && sport ~ /^[0-9]+$/ && dport ~ /^[0-9]+$/) {
+        key=proto " " sport " " tip " " dport;
+        if(!seen[key]++) print proto, sport, tip, dport;
+      }
+    }
+  ' "$STATE_FILE" > "$tmp"
+  cat "$tmp" > "$STATE_FILE"
+  rm -f "$tmp"
+  chmod 600 "$STATE_FILE"
+}
+
+enable_ip_forward() {
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null || true
+}
+
+ensure_chains() {
+  iptables -w -t nat -N "$CHAIN_NAT" 2>/dev/null || true
+  iptables -w -t nat -N "$CHAIN_POST" 2>/dev/null || true
+  iptables -w -N "$CHAIN_FWD" 2>/dev/null || true
+  iptables -w -t nat -F "$CHAIN_NAT"
+  iptables -w -t nat -F "$CHAIN_POST"
+  iptables -w -F "$CHAIN_FWD"
+  while iptables -w -t nat -D PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT" 2>/dev/null; do :; done
+  iptables -w -t nat -A PREROUTING -i "$WAN_IF" -j "$CHAIN_NAT"
+  while iptables -w -t nat -D POSTROUTING -j "$CHAIN_POST" 2>/dev/null; do :; done
+  iptables -w -t nat -A POSTROUTING -j "$CHAIN_POST"
+  while iptables -w -D FORWARD -j "$CHAIN_FWD" 2>/dev/null; do :; done
+  iptables -w -A FORWARD -j "$CHAIN_FWD"
+}
+
+apply_rules() {
+  refresh_net_info
+  load_config
+  enable_ip_forward
+  normalize_state_file
+  ensure_chains
+  local targets=""
+  while read -r proto sport tip dport; do
+    [[ -z "${proto:-}" || "${proto:0:1}" == "#" ]] && continue
+    [[ -z "${sport:-}" || -z "${tip:-}" ]] && continue
+    dport="${dport:-$sport}"
+    iptables -w -t nat -A "$CHAIN_NAT" -p "$proto" --dport "$sport" -j DNAT --to-destination "${tip}:${dport}"
+    iptables -w -A "$CHAIN_FWD" -p "$proto" -d "$tip" --dport "$dport" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+    iptables -w -A "$CHAIN_FWD" -p "$proto" -s "$tip" --sport "$dport" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    targets="$targets $tip"
+  done < "$STATE_FILE"
+  targets="$(uniq_words "$targets")"
+  for tip in $targets; do
+    if [[ "$NAT_MODE" == "snat" && -n "${WAN_IP:-}" ]]; then
+      iptables -w -t nat -A "$CHAIN_POST" -o "$WAN_IF" -d "$tip" -j SNAT --to-source "$WAN_IP"
+    else
+      iptables -w -t nat -A "$CHAIN_POST" -o "$WAN_IF" -d "$tip" -j MASQUERADE
     fi
-    port="$value"
   done
+}
+
+add_state_rule() {
+  local proto="$1" sport="$2" tip="$3" dport="${4:-$2}"
+  if grep -qE "^${proto}[[:space:]]+${sport}[[:space:]]+${tip}[[:space:]]+${dport}([[:space:]]|$)" "$STATE_FILE" 2>/dev/null; then
+    warn "$(text exists): $proto $sport -> $tip:$dport"
+    return 1
+  fi
+  echo "$proto $sport $tip $dport" >> "$STATE_FILE"
+  ok "$(text added): $proto $sport -> $tip:$dport"
+}
+
+print_rules() {
+  normalize_state_file
+  if [[ ! -s "$STATE_FILE" ]]; then
+    warn "$(text no_rules)"
+    return 0
+  fi
+  echo -e "${BOLD}$(text current_rules):${RESET}"
+  awk '{printf "%2d) %-3s %-5s -> %s:%s\n", NR, $1, $2, $3, $4}' "$STATE_FILE"
+}
+
+choose_protocol() {
+  local sel
+  CHOSEN_PROTOCOL=""
   while true; do
-    read_nav "Workers [Enter = $workers]: "
+    header
+    echo "$(text choose_proto):"
+    echo "1) UDP"
+    echo "2) TCP"
+    echo "3) $(text udp_tcp)"
+    echo "0) $(text back)"
+    echo "00) $(text main_menu)"
+    echo
+    read_nav "$(text choice)"
     is_back && return 1
     is_main && return 10
-    value="$NAV_VALUE"
-    [[ -z "$value" ]] && value="$workers"
-    valid_workers "$value" && { workers="$value"; break; }
-    warn "Workers must be a number from 1 to 64."
+    sel="$NAV_VALUE"
+    case "$sel" in
+      1) CHOSEN_PROTOCOL="udp"; return 0 ;;
+      2) CHOSEN_PROTOCOL="tcp"; return 0 ;;
+      3) CHOSEN_PROTOCOL="both"; return 0 ;;
+      *) warn "$(text bad_choice)"; pause ;;
+    esac
   done
-  conf_save "$port" "$secret" "$workers" "$tag"
 }
 
-start_proxy() {
-  ensure_docker
-  header
-  ensure_config_interactive || return $?
-  conf_load
-  if container_exists; then docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; fi
-  info "Pulling image $IMAGE..."
-  docker pull "$IMAGE" >/dev/null || true
-  local docker_args=(run -d --name "$CONTAINER_NAME" --restart unless-stopped -p "${CONF_PORT}:443" -v "${VOLUME_NAME}:/data" -e "SECRET=${CONF_SECRET}" -e "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}")
-  [[ -n "$CONF_TAG" ]] && docker_args+=(-e "TAG=${CONF_TAG}")
-  docker_args+=("$IMAGE")
-  docker "${docker_args[@]}" >/dev/null
-  open_firewall_iptables "$CONF_PORT"
-  ok "$(text started)"
-  show_link
-  pause
+ports_from_input() {
+  local input="$1" default_list="$2" cleaned="" p
+  if [[ -z "${input// }" ]]; then input="$default_list"; fi
+  for p in $input; do
+    if valid_port "$p"; then cleaned="$cleaned $p"; else warn "Invalid port skipped: $p"; fi
+  done
+  uniq_words "$cleaned"
 }
 
-stop_proxy() {
-  ensure_docker
-  header
-  if container_running; then docker stop "$CONTAINER_NAME" >/dev/null; ok "$(text stopped)"; else warn "$(text not_running)"; fi
-  pause
-}
-
-restart_proxy() {
-  ensure_docker
-  header
-  if container_exists; then docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; fi
-  conf_load
-  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then warn "$(text proxy_not_configured)"; pause; return 0; fi
-  docker pull "$IMAGE" >/dev/null || true
-  local docker_args=(run -d --name "$CONTAINER_NAME" --restart unless-stopped -p "${CONF_PORT}:443" -v "${VOLUME_NAME}:/data" -e "SECRET=${CONF_SECRET}" -e "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}")
-  [[ -n "$CONF_TAG" ]] && docker_args+=(-e "TAG=${CONF_TAG}")
-  docker_args+=("$IMAGE")
-  docker "${docker_args[@]}" >/dev/null
-  open_firewall_iptables "$CONF_PORT"
-  ok "$(text restarted)"
-  show_link
-  pause
-}
-
-status_proxy() {
-  ensure_docker
-  header
-  conf_load
-  echo "Docker container:"
-  docker ps -a --filter "name=^/${CONTAINER_NAME}$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
-  echo
-  echo "Config: $CONF"
-  echo "LANGUAGE=${LANGUAGE:-not set}"
-  echo "PORT=${CONF_PORT:-not set}"
-  echo "SECRET=${CONF_SECRET:-not set}"
-  echo "WORKERS=${CONF_WORKERS:-$DEFAULT_WORKERS}"
-  [[ -n "$CONF_TAG" ]] && echo "TAG=$CONF_TAG"
-  echo "Quick command: $QUICK_CMD"
-  echo
-  if container_running; then
-    info "Stats endpoint inside container:"
-    docker exec "$CONTAINER_NAME" sh -c 'curl -fsS http://localhost:2398/stats 2>/dev/null | head -n 20 || true' || true
-  fi
-  pause
-}
-
-change_port() {
-  local newport
-  conf_load
-  header
-  if [[ -z "$CONF_SECRET" ]]; then warn "$(text proxy_not_configured)"; pause; return 0; fi
+create_proxy_custom() {
+  local target_ip ports_in final_ports added=0 pr p
   while true; do
-    echo "Current port: ${CONF_PORT:-not set}"
-    read_nav "$(text new_port)"
+    header
+    echo "$(text create_proxy)"
+    echo
+    read_nav "$(text target_ip)"
     is_back && return 0
     is_main && return 10
-    newport="$NAV_VALUE"
-    valid_port "$newport" || { warn "$(text bad_port)"; continue; }
-    port_free "$newport" || { warn "$(text port_busy)"; continue; }
-    break
+    target_ip="$NAV_VALUE"
+    valid_ip "$target_ip" && break
+    warn "$(text bad_ip)"
+    pause
   done
-  [[ -n "$CONF_PORT" ]] && remove_firewall_iptables "$CONF_PORT"
-  conf_save "$newport" "$CONF_SECRET" "${CONF_WORKERS:-$DEFAULT_WORKERS}" "$CONF_TAG"
-  ok "Port saved. Restarting..."
-  restart_proxy
-}
-
-regenerate_secret() {
-  conf_load
-  header
-  if [[ -z "$CONF_PORT" ]]; then warn "$(text proxy_not_configured)"; pause; return 0; fi
-  local newsecret
-  newsecret="$(rand_hex_16bytes)"
-  conf_save "$CONF_PORT" "$newsecret" "${CONF_WORKERS:-$DEFAULT_WORKERS}" "$CONF_TAG"
-  ok "$(text secret_updated)"
-  restart_proxy
-}
-
-change_workers() {
-  local value
-  conf_load
-  header
-  if [[ -z "$CONF_PORT" || -z "$CONF_SECRET" ]]; then warn "$(text proxy_not_configured)"; pause; return 0; fi
+  choose_protocol || return $?
+  local protos=()
+  case "$CHOSEN_PROTOCOL" in
+    udp) protos=(udp) ;;
+    tcp) protos=(tcp) ;;
+    both) protos=(udp tcp) ;;
+  esac
   while true; do
-    echo "Current workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}"
-    read_nav "New workers 1-64: "
+    header
+    echo "$(text default_ports): ${DEFAULT_PORTS[*]}"
+    echo
+    read_nav "$(text ports_prompt)"
     is_back && return 0
     is_main && return 10
-    value="$NAV_VALUE"
-    valid_workers "$value" && break
-    warn "Invalid value."
+    ports_in="$NAV_VALUE"
+    final_ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
+    [[ -n "${final_ports// }" ]] && break
+    warn "No valid ports."
+    pause
   done
-  conf_save "$CONF_PORT" "$CONF_SECRET" "$value" "$CONF_TAG"
-  ok "$(text workers_saved)"
-  restart_proxy
-}
-
-logs_proxy() {
-  ensure_docker
-  header
-  if container_exists; then docker logs --tail=120 "$CONTAINER_NAME" || true; else warn "Container not found."; fi
+  for p in $final_ports; do
+    for pr in "${protos[@]}"; do
+      add_state_rule "$pr" "$p" "$target_ip" "$p" && added=1 || true
+    done
+  done
+  if [[ "$added" -eq 1 ]]; then apply_rules; ok "$(text applied)"; else warn "Nothing added."; fi
   pause
 }
 
-update_image() {
-  ensure_docker
-  header
-  docker pull "$IMAGE"
-  ok "Docker image updated. Restart to apply."
+create_antizapret_preset() {
+  local target_ip mode p added=0
+  while true; do
+    header
+    echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
+    echo "Preset ports: ${DEFAULT_PORTS[*]}"
+    echo "80 and 443 are not added by default."
+    echo
+    read_nav "$(text target_ip)"
+    is_back && return 0
+    is_main && return 10
+    target_ip="$NAV_VALUE"
+    valid_ip "$target_ip" && break
+    warn "$(text bad_ip)"
+    pause
+  done
+  while true; do
+    header
+    echo -e "${SOFT_GREEN}${BOLD}AntizapretVPN by GubernievS${RESET}"
+    if [[ "$LANGUAGE" == "en" ]]; then
+      echo "1) Recommended: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP"
+      echo "2) All preset ports TCP+UDP"
+      echo "3) All preset ports UDP only"
+      echo "4) All preset ports TCP only"
+    else
+      echo "1) Рекомендуемый режим: OpenVPN TCP+UDP, WireGuard/AmneziaWG UDP"
+      echo "2) Все preset-порты TCP+UDP"
+      echo "3) Все preset-порты только UDP"
+      echo "4) Все preset-порты только TCP"
+    fi
+    echo "0) $(text back)"
+    echo "00) $(text main_menu)"
+    echo
+    read_nav "$(text choice)"
+    is_back && return 0
+    is_main && return 10
+    mode="$NAV_VALUE"
+    case "$mode" in
+      1)
+        for p in "${ANTIZAPRET_OPENVPN_PORTS[@]}"; do
+          add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        for p in "${ANTIZAPRET_WG_PORTS[@]}"; do add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true; done
+        break ;;
+      2)
+        for p in "${DEFAULT_PORTS[@]}"; do
+          add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true
+          add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true
+        done
+        break ;;
+      3) for p in "${DEFAULT_PORTS[@]}"; do add_state_rule udp "$p" "$target_ip" "$p" && added=1 || true; done; break ;;
+      4) for p in "${DEFAULT_PORTS[@]}"; do add_state_rule tcp "$p" "$target_ip" "$p" && added=1 || true; done; break ;;
+      *) warn "$(text bad_choice)"; pause ;;
+    esac
+  done
+  if [[ "$added" -eq 1 ]]; then apply_rules; ok "$(text applied)"; else warn "Nothing added."; fi
   pause
 }
 
-uninstall_all() {
-  ensure_docker
+delete_selected_rules() {
+  local nums filtered="" n tmp
   header
-  warn "This will remove container, config and Docker volume $VOLUME_NAME."
+  print_rules
+  [[ -s "$STATE_FILE" ]] || { pause; return 0; }
+  echo
+  read_nav "$(text delete_numbers)"
+  is_back && return 0
+  is_main && return 10
+  nums="$NAV_VALUE"
+  for n in $nums; do
+    [[ "$n" =~ ^[0-9]+$ ]] && filtered="$filtered $n" || warn "Skipped invalid number: $n"
+  done
+  filtered="$(trim "$filtered")"
+  [[ -z "$filtered" ]] && { warn "No valid numbers."; pause; return 0; }
+  tmp="$(mktemp)"
+  awk -v nums="$filtered" 'BEGIN{split(nums,a," "); for(i in a) del[a[i]]=1} {if(!del[NR]) print $0}' "$STATE_FILE" > "$tmp"
+  cat "$tmp" > "$STATE_FILE"
+  rm -f "$tmp"
+  apply_rules
+  ok "$(text deleted)"
+  pause
+}
+
+delete_all_rules() {
+  header
+  warn "This will remove all rules managed by ${APP_NAME}. Other firewall rules are not touched."
+  echo
   read_nav "$(text confirm_yes)"
   is_back && return 0
   is_main && return 10
   if [[ "$NAV_VALUE" == "YES" ]]; then
-    conf_load
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
-    [[ -n "$CONF_PORT" ]] && remove_firewall_iptables "$CONF_PORT"
-    rm -f "$CONF"
-    ok "$(text deleted)"
+    : > "$STATE_FILE"
+    apply_rules
+    ok "$(text all_deleted)"
   else
     warn "$(text cancelled)"
   fi
   pause
+}
+
+show_iptables_rules() {
+  header
+  print_rules
+  echo
+  info "WAN interface: ${WAN_IF:-unknown}"
+  info "WAN IPv4     : ${WAN_IP:-unknown}"
+  info "NAT mode     : $NAT_MODE"
+  echo
+  echo "iptables NAT chain:"
+  iptables -w -t nat -S "$CHAIN_NAT" 2>/dev/null || true
+  echo
+  echo "iptables FORWARD chain:"
+  iptables -w -S "$CHAIN_FWD" 2>/dev/null || true
+  pause
+}
+
+check_tcp() {
+  local host="$1" port="$2"
+  if timeout 3 bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then ok "TCP $host:$port OK"; else err "TCP $host:$port failed/closed"; fi
+}
+
+check_udp() {
+  local host="$1" port="$2"
+  if cmd_exists nc; then
+    if timeout 4 nc -zuv -w2 "$host" "$port" >/tmp/proxy_udp_nc.out 2>&1; then ok "UDP $host:$port probe OK"; else warn "UDP $host:$port: no clear response; UDP cannot be checked reliably without app reply"; fi
+  else
+    warn "UDP $host:$port: install netcat-openbsd for UDP probe. UDP checks are conditional."
+  fi
+}
+
+check_current_rules() {
+  header
+  normalize_state_file
+  if [[ ! -s "$STATE_FILE" ]]; then warn "$(text no_rules)"; pause; return 0; fi
+  while read -r proto sport tip dport; do
+    dport="${dport:-$sport}"
+    [[ "$proto" == "tcp" ]] && check_tcp "$tip" "$dport"
+    [[ "$proto" == "udp" ]] && check_udp "$tip" "$dport"
+  done < "$STATE_FILE"
+  pause
+}
+
+check_custom_ports() {
+  local target_ip ports_in ports p
+  while true; do
+    header
+    read_nav "$(text target_ip)"
+    is_back && return 0
+    is_main && return 10
+    target_ip="$NAV_VALUE"
+    valid_ip "$target_ip" && break
+    warn "$(text bad_ip)"
+    pause
+  done
+  choose_protocol || return $?
+  while true; do
+    header
+    read_nav "$(text ports_prompt)"
+    is_back && return 0
+    is_main && return 10
+    ports_in="$NAV_VALUE"
+    ports="$(ports_from_input "$ports_in" "${DEFAULT_PORTS[*]}")"
+    [[ -n "${ports// }" ]] && break
+    warn "No valid ports."
+    pause
+  done
+  header
+  for p in $ports; do
+    case "$CHOSEN_PROTOCOL" in
+      tcp) check_tcp "$target_ip" "$p" ;;
+      udp) check_udp "$target_ip" "$p" ;;
+      both) check_tcp "$target_ip" "$p"; check_udp "$target_ip" "$p" ;;
+    esac
+  done
+  pause
+}
+
+ports_check_menu() {
+  while true; do
+    header
+    echo "$(text port_check)"
+    echo "1) $(text check_current)"
+    echo "2) $(text check_custom)"
+    echo "0) $(text back)"
+    echo "00) $(text main_menu)"
+    echo
+    read_nav "$(text choice)"
+    is_back && return 0
+    is_main && return 10
+    case "$NAV_VALUE" in
+      1) check_current_rules || return $? ;;
+      2) check_custom_ports || return $? ;;
+      *) warn "$(text bad_choice)"; pause ;;
+    esac
+  done
+}
+
+show_conntrack_status() {
+  local do_header="${1:-true}"
+  [[ "$do_header" == "true" ]] && header
+  echo "conntrack diagnostics:"
+  [[ -r /proc/sys/net/netfilter/nf_conntrack_count ]] && echo "nf_conntrack_count: $(cat /proc/sys/net/netfilter/nf_conntrack_count)" || warn "nf_conntrack_count unavailable"
+  [[ -r /proc/sys/net/netfilter/nf_conntrack_max ]] && echo "nf_conntrack_max  : $(cat /proc/sys/net/netfilter/nf_conntrack_max)"
+  for k in nf_conntrack_udp_timeout nf_conntrack_udp_timeout_stream nf_conntrack_tcp_timeout_established; do
+    [[ -r "/proc/sys/net/netfilter/$k" ]] && echo "$k: $(cat "/proc/sys/net/netfilter/$k")"
+  done
+  echo
+  if cmd_exists conntrack; then conntrack -S 2>/dev/null || true; else warn "Install conntrack-tools for extended statistics: apt-get install -y conntrack"; fi
+  [[ "$do_header" == "true" ]] && pause
+}
+
+apply_tuning() {
+  header
+  cat > "$SYSCTL_FILE" <<'EOF_SYSCTL'
+# Proxy UDP manager tuning
+net.ipv4.ip_forward=1
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_mtu_probing=1
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+net.ipv4.tcp_rmem=16384 131072 67108864
+net.ipv4.tcp_wmem=16384 131072 67108864
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+net.core.netdev_max_backlog=250000
+net.core.netdev_budget=600
+net.core.netdev_budget_usecs=8000
+net.core.somaxconn=4096
+net.ipv4.ip_local_port_range=10000 65535
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.secure_redirects=0
+net.ipv4.conf.default.secure_redirects=0
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.netfilter.nf_conntrack_max=1048576
+net.netfilter.nf_conntrack_udp_timeout=15
+net.netfilter.nf_conntrack_udp_timeout_stream=60
+net.netfilter.nf_conntrack_tcp_timeout_established=7200
+EOF_SYSCTL
+  echo nf_conntrack > /etc/modules-load.d/proxy-udp-nf_conntrack.conf
+  sysctl --system >/dev/null || true
+  ok "Tuning written to $SYSCTL_FILE and applied."
+  echo
+  show_conntrack_status false
+  pause
+}
+
+nat_mode_menu() {
+  while true; do
+    header
+    echo "NAT mode: $NAT_MODE"
+    echo "1) SNAT to server external IPv4 - better for static IP"
+    echo "2) MASQUERADE - better for dynamic IP"
+    echo "0) $(text back)"
+    echo "00) $(text main_menu)"
+    echo
+    read_nav "$(text choice)"
+    is_back && return 0
+    is_main && return 10
+    case "$NAV_VALUE" in
+      1) NAT_MODE="snat"; save_config; apply_rules; ok "SNAT enabled."; pause ;;
+      2) NAT_MODE="masquerade"; save_config; apply_rules; ok "MASQUERADE enabled."; pause ;;
+      *) warn "$(text bad_choice)"; pause ;;
+    esac
+  done
+}
+
+change_language_menu() {
+  choose_language
 }
 
 download_or_copy_self() {
@@ -578,55 +772,98 @@ download_or_copy_self() {
 
 install_quick_command() {
   require_root
-  init_conf
-  conf_load
+  init_files
+  load_config
   download_or_copy_self "$QUICK_CMD" || { err "Unable to install $QUICK_CMD"; return 1; }
   ok "$(text quick_done): $QUICK_CMD"
-  ok "Run later with: mtproto-go"
+}
+
+install_service() {
+  install_quick_command
+  cat > "$SERVICE_FILE" <<EOF_UNIT
+[Unit]
+Description=Proxy UDP iptables rules restore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$QUICK_CMD apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+  if cmd_exists systemctl; then
+    systemctl daemon-reload
+    systemctl enable proxy-go.service >/dev/null || true
+  fi
+  ok "$(text service_done): proxy-go.service"
+  ok "Run later with: proxy-go"
+}
+
+settings_menu() {
+  while true; do
+    header
+    echo "$(text settings)"
+    echo "1) $(text tune_apply)"
+    echo "2) $(text conntrack_show)"
+    echo "3) $(text nat_mode)"
+    echo "4) $(text change_language)"
+    echo "5) $(text install_quick)"
+    echo "0) $(text back)"
+    echo "00) $(text main_menu)"
+    echo
+    read_nav "$(text choice)"
+    is_back && return 0
+    is_main && return 10
+    case "$NAV_VALUE" in
+      1) apply_tuning || return $? ;;
+      2) show_conntrack_status true ;;
+      3) nat_mode_menu || return $? ;;
+      4) change_language_menu ;;
+      5) install_service; pause ;;
+      *) warn "$(text bad_choice)"; pause ;;
+    esac
+  done
 }
 
 main_menu() {
   local rc=0
   require_root
-  init_conf
+  ensure_prereqs
+  init_files
   ensure_language
+  refresh_net_info
+  apply_rules
   while true; do
-    conf_load
+    load_config
+    refresh_net_info
     header
     echo -e "${BOLD}$(text main_menu)${RESET}"
-    echo "1) $(text create_start)"
-    echo "2) $(text stop)"
-    echo "3) $(text restart)"
-    echo "4) $(text status)"
-    echo "5) $(text show_link)"
-    echo "6) $(text change_port)"
-    echo "7) $(text regen_secret)"
-    echo "8) $(text workers)"
-    echo "9) $(text logs)"
-    echo "10) $(text update)"
-    echo "11) $(text delete_all)"
-    echo "12) $(text change_language)"
-    echo "13) $(text install_quick)"
+    echo "1) $(text create_proxy)"
+    echo -e "2) ${SOFT_GREEN}$(text antizapret)${RESET}"
+    echo "3) $(text delete_selected)"
+    echo "4) $(text delete_all)"
+    echo "5) $(text show_rules)"
+    echo "6) $(text port_check)"
+    echo "7) $(text settings)"
+    echo "8) $(text install_quick)"
     echo "0) $(text exit)"
     echo
-    echo -e "${DIM}Port: ${CONF_PORT:-not set}, workers: ${CONF_WORKERS:-$DEFAULT_WORKERS}, quick: $QUICK_CMD${RESET}"
+    echo -e "${DIM}WAN: ${WAN_IF:-unknown}, IPv4: ${WAN_IP:-unknown}, NAT: $NAT_MODE, quick: $QUICK_CMD${RESET}"
     echo
     read_nav "$(text choice)"
     rc=0
     case "$NAV_VALUE" in
-      1) start_proxy || rc=$? ;;
-      2) stop_proxy || rc=$? ;;
-      3) restart_proxy || rc=$? ;;
-      4) status_proxy || rc=$? ;;
-      5) header; show_link; pause ;;
-      6) change_port || rc=$? ;;
-      7) regenerate_secret || rc=$? ;;
-      8) change_workers || rc=$? ;;
-      9) logs_proxy || rc=$? ;;
-      10) update_image || rc=$? ;;
-      11) uninstall_all || rc=$? ;;
-      12) choose_language ;;
-      13) install_quick_command; pause ;;
+      1) create_proxy_custom || rc=$? ;;
+      2) create_antizapret_preset || rc=$? ;;
+      3) delete_selected_rules || rc=$? ;;
+      4) delete_all_rules || rc=$? ;;
+      5) show_iptables_rules || rc=$? ;;
+      6) ports_check_menu || rc=$? ;;
+      7) settings_menu || rc=$? ;;
+      8) install_service; pause ;;
       0|"$MSG_BACK") exit 0 ;;
       *) warn "$(text bad_choice)"; pause ;;
     esac
@@ -635,12 +872,16 @@ main_menu() {
 }
 
 case "${1:-}" in
-  start) LANGUAGE="ru"; require_root; init_conf; conf_load; start_proxy ;;
-  restart) LANGUAGE="ru"; require_root; init_conf; conf_load; restart_proxy ;;
-  stop) LANGUAGE="ru"; require_root; init_conf; conf_load; stop_proxy ;;
-  status) LANGUAGE="ru"; require_root; init_conf; conf_load; status_proxy ;;
-  logs) LANGUAGE="ru"; require_root; init_conf; conf_load; logs_proxy ;;
-  install-go|install|quick) LANGUAGE="ru"; require_root; init_conf; conf_load; install_quick_command ;;
-  language) require_root; init_conf; conf_load; choose_language ;;
-  *) main_menu ;;
+  apply)
+    LANGUAGE="ru"; require_root; ensure_prereqs; init_files; load_config; refresh_net_info; apply_rules ;;
+  status)
+    LANGUAGE="ru"; require_root; ensure_prereqs; init_files; load_config; refresh_net_info; print_rules; show_conntrack_status false ;;
+  tune)
+    LANGUAGE="ru"; require_root; ensure_prereqs; init_files; load_config; apply_tuning ;;
+  install-go|install|quick)
+    LANGUAGE="ru"; require_root; init_files; load_config; install_service ;;
+  language)
+    require_root; init_files; load_config; choose_language ;;
+  *)
+    main_menu ;;
 esac
